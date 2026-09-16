@@ -14,6 +14,8 @@ import { ConferenceView } from './components/views/ConferenceView';
 import { CRMView } from './components/views/CRMView';
 import { UsersExtensionsView } from './components/views/UsersExtensionsView';
 import { AsteriskMiddlewareView } from './components/views/AsteriskMiddlewareView';
+import { AgentCallView } from './components/views/AgentCallView';
+import { LoginView } from './components/LoginView';
 
 // Data & types
 import {
@@ -83,7 +85,18 @@ export default function App() {
     return saved ? JSON.parse(saved) : INITIAL_USERS;
   });
 
-  const [currentUser] = useState<PBXUser>(INITIAL_USERS[0]); // Eng. Nesma Gamal (101)
+  const [currentUser, setCurrentUser] = useState<PBXUser | null>(() => {
+    const saved = localStorage.getItem('etsalati_logged_in_user');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch {
+        return null;
+      }
+    }
+    return INITIAL_USERS[0]; // Eng. Nesma Gamal (Admin) by default
+  });
+  const [adminPreviewAgent, setAdminPreviewAgent] = useState<boolean>(false);
   const [amiEvents, setAmiEvents] = useState<AMIEvent[]>(INITIAL_AMI_EVENTS);
   const [pbxStatus, setPbxStatus] = useState<PBXStatus>(INITIAL_PBX_STATUS);
 
@@ -383,7 +396,7 @@ export default function App() {
           id: `n-${Date.now()}`,
           text,
           date: new Date().toISOString().slice(0, 10),
-          author: currentUser.name,
+          author: currentUser?.name || 'مستخدم النظام',
         };
         return {
           ...c,
@@ -393,6 +406,44 @@ export default function App() {
       })
     );
   };
+
+  const handleLoginSuccess = (user: PBXUser) => {
+    setCurrentUser(user);
+    localStorage.setItem('etsalati_logged_in_user', JSON.stringify(user));
+    setAdminPreviewAgent(false);
+  };
+
+  const handleLogout = () => {
+    setCurrentUser(null);
+    localStorage.removeItem('etsalati_logged_in_user');
+    setAdminPreviewAgent(false);
+  };
+
+  // If not logged in -> Show Login Screen
+  if (!currentUser) {
+    return <LoginView users={users} onLoginSuccess={handleLoginSuccess} />;
+  }
+
+  // If logged-in user is an Agent (or Admin testing Agent screen)
+  // "اما ال انشئهم لعمل الاتصال فقط لا تظهرلهم الا قائمة الازرار فقط او المستخدم المتصل بياناته عشان يعرف من المتصل والتوقيت"
+  if (currentUser.role !== 'admin' || adminPreviewAgent) {
+    return (
+      <AgentCallView
+        currentUser={currentUser}
+        activeCalls={activeCalls}
+        incomingCall={incomingCall}
+        callHistory={callHistory}
+        onMakeCall={handleMakeCall}
+        onHangupCall={handleHangup}
+        onHoldToggle={handleHoldToggle}
+        onAnswerIncoming={() => incomingCall && handleAnswerIncomingCall(incomingCall)}
+        onRejectIncoming={() => incomingCall && handleRejectIncomingCall(incomingCall)}
+        onTriggerSimulatedCall={handleTriggerSimulatedIncomingCall}
+        onLogout={handleLogout}
+        onSwitchToAdmin={currentUser.role === 'admin' ? () => setAdminPreviewAgent(false) : undefined}
+      />
+    );
+  }
 
   const unreadVoicemailCount = voicemails.filter((v) => !v.isRead).length;
 
@@ -404,6 +455,10 @@ export default function App() {
         currentUser={currentUser}
         onOpenSoftphone={() => setIsSoftphoneOpen(true)}
         onTriggerSimulatedCall={handleTriggerSimulatedIncomingCall}
+        unreadVoicemailsCount={unreadVoicemailCount}
+        activeCallsCount={activeCalls.length}
+        onLogout={handleLogout}
+        onSwitchToAgentView={() => setAdminPreviewAgent(true)}
       />
 
       {/* Primary Navigation Tabs */}

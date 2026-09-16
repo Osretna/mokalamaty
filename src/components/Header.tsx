@@ -11,7 +11,9 @@ import {
   Flame,
   Clock,
   Sparkles,
-  PhoneIncoming
+  PhoneIncoming,
+  LogOut,
+  Headphones
 } from 'lucide-react';
 import { PBXStatus, PBXUser } from '../types';
 
@@ -22,6 +24,8 @@ interface HeaderProps {
   onTriggerSimulatedCall: () => void;
   unreadVoicemailsCount: number;
   activeCallsCount: number;
+  onLogout?: () => void;
+  onSwitchToAgentView?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -31,6 +35,8 @@ export const Header: React.FC<HeaderProps> = ({
   onTriggerSimulatedCall,
   unreadVoicemailsCount,
   activeCallsCount,
+  onLogout,
+  onSwitchToAgentView,
 }) => {
   const [timeStr, setTimeStr] = useState('');
 
@@ -152,13 +158,41 @@ export const Header: React.FC<HeaderProps> = ({
               {currentUser.extension}
             </div>
             <div className="hidden lg:block text-right">
-              <div className="font-semibold text-slate-200 leading-tight">{currentUser.name}</div>
+              <div className="font-semibold text-slate-200 leading-tight flex items-center gap-1.5">
+                <span>{currentUser.name}</span>
+                <span className="text-[10px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 font-bold">
+                  {currentUser.role === 'admin' ? 'مدير' : 'موظف'}
+                </span>
+              </div>
               <div className="text-[11px] text-emerald-400 flex items-center gap-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
                 تحويلة {currentUser.extension} ({currentUser.protocol})
               </div>
             </div>
           </div>
+
+          {/* Switch to Agent View (For Admin Testing) */}
+          {onSwitchToAgentView && currentUser.role === 'admin' && (
+            <button
+              onClick={onSwitchToAgentView}
+              title="معاينة شاشة موظف الاتصال (الأزرار والمتصل و3CX)"
+              className="hidden sm:flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-cyan-950/60 hover:bg-cyan-900/80 text-cyan-300 border border-cyan-700/50 text-xs font-semibold transition-colors cursor-pointer"
+            >
+              <Headphones className="w-3.5 h-3.5 text-cyan-400" />
+              <span>شاشة الموظف</span>
+            </button>
+          )}
+
+          {/* Logout Button */}
+          {onLogout && (
+            <button
+              onClick={onLogout}
+              title="تسجيل الخروج والعودة لشاشة الدخول"
+              className="p-1.5 rounded-lg bg-slate-800 hover:bg-red-950/60 text-slate-400 hover:text-red-300 border border-slate-700 hover:border-red-500/40 transition-colors cursor-pointer"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          )}
         </div>
       </div>
     </header>

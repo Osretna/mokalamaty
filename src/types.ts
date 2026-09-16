@@ -113,15 +113,20 @@ export interface CRMContact {
 export interface PBXUser {
   id: string;
   name: string;
+  username: string; // Login ID (e.g. agent101 or 101)
+  password: string; // Login & SIP authentication password
   email: string;
   extension: string;
   protocol: 'SIP' | 'IAX2' | 'PJSIP';
   role: 'admin' | 'supervisor' | 'agent';
   status: 'online' | 'busy' | 'away' | 'dnd' | 'offline';
-  secret: string;
+  secret: string; // SIP Secret
   context: string;
   voicemailEnabled: boolean;
   recordingEnabled: boolean;
+  sipServer?: string;
+  createdAt?: string;
+  syncedToFirebase?: boolean;
 }
 
 export interface AMIEvent {
