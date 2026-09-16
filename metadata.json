@@ -1,0 +1,6 @@
+{
+  "name": "اتصالاتي - نظام إدارة الاتصالات والـ PBX",
+  "description": "لوحة تحكم سحابية متكاملة لإدارة مكالمات Asterisk، البريد الصوتي، الفاكس الرقمي، غرف المؤتمرات، والتكامل اللحظي مع Firebase و CRM.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
