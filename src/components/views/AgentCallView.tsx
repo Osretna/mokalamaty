@@ -27,11 +27,23 @@ import {
   CheckCircle2,
   FileText,
   Settings,
-  Headphones
+  Headphones,
+  Wrench,
+  Sparkles,
+  Activity,
+  Wifi,
+  AlertTriangle
 } from 'lucide-react';
 import { PBXUser, Call } from '../../types';
-import { playDTMF } from '../../utils/audioTones';
+import {
+  playDTMF,
+  startDialTone,
+  stopDialTone,
+  startLiveMicTest,
+  playTelephonyFx
+} from '../../utils/audioTones';
 import { downloadCallAudioBlob } from '../../lib/firebase';
+import { ThreeCXDiagnosticModal } from '../ThreeCXDiagnosticModal';
 
 interface AgentCallViewProps {
   currentUser: PBXUser;
@@ -67,9 +79,73 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [lastDialed, setLastDialed] = useState<string>('');
   const [callNotes, setCallNotes] = useState('');
+  const [is3CXFixModalOpen, setIs3CXFixModalOpen] = useState(false);
+  const [isOffHook, setIsOffHook] = useState(false);
+  const [isMicTesting, setIsMicTesting] = useState(false);
+  const [micLevel, setMicLevel] = useState(0);
+  const [micStopFn, setMicStopFn] = useState<(() => void) | null>(null);
 
   // Find active call for this agent's extension
   const currentCall = activeCalls.find((c) => c.extension === currentUser.extension) || activeCalls[0];
+
+  // Stop dial tone when in call or call state changes
+  useEffect(() => {
+    if (currentCall) {
+      stopDialTone();
+      setIsOffHook(true);
+    } else if (!isOffHook) {
+      stopDialTone();
+    }
+  }, [currentCall]);
+
+  // Clean up on unmount
+  useEffect(() => {
+    return () => {
+      stopDialTone();
+      if (micStopFn) {
+        micStopFn();
+      }
+    };
+  }, [micStopFn]);
+
+  // Toggle Hook Switch (رفع / إنزال السماعة)
+  const handleToggleHook = () => {
+    if (currentCall) {
+      onHangupCall(currentCall.id);
+      setIsOffHook(false);
+      stopDialTone();
+      playTelephonyFx('hangup');
+    } else if (isOffHook) {
+      // Put On Hook
+      setIsOffHook(false);
+      stopDialTone();
+      playTelephonyFx('hangup');
+    } else {
+      // Take Off Hook -> Start PBX Dial Tone
+      setIsOffHook(true);
+      startDialTone();
+    }
+  };
+
+  // Toggle Live Mic Echo Test
+  const handleToggleMicTest = async () => {
+    if (isMicTesting && micStopFn) {
+      micStopFn();
+      setMicStopFn(null);
+      setIsMicTesting(false);
+      setMicLevel(0);
+    } else {
+      try {
+        const { stop } = await startLiveMicTest((level) => {
+          setMicLevel(level);
+        }, true);
+        setMicStopFn(() => stop);
+        setIsMicTesting(true);
+      } catch {
+        alert('يرجى السماح بالوصول إلى الميكروفون من إعدادات المتصفح');
+      }
+    }
+  };
 
   // Keypad buttons
   const keypad = [
@@ -88,12 +164,15 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
   ];
 
   const handleKeyPress = (digit: string) => {
+    stopDialTone();
     playDTMF(digit);
     setDialNumber((prev) => prev + digit);
   };
 
   const handleCall = () => {
     if (!dialNumber.trim()) return;
+    stopDialTone();
+    setIsOffHook(true);
     setLastDialed(dialNumber);
     onMakeCall(dialNumber.trim());
     setDialNumber('');
@@ -101,6 +180,8 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
 
   const handleRedial = () => {
     if (lastDialed) {
+      stopDialTone();
+      setIsOffHook(true);
       onMakeCall(lastDialed);
     }
   };
@@ -225,6 +306,42 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
 
       {/* Main Content Area */}
       <main className="max-w-7xl mx-auto p-4 sm:p-6 flex-1 w-full space-y-6">
+        
+        {/* 3CX "Not connected" Fix Notification Banner */}
+        <div className="bg-gradient-to-r from-amber-500/15 via-slate-900 to-cyan-500/15 border-2 border-amber-500/40 rounded-3xl p-4 sm:p-5 flex flex-col md:flex-row items-center justify-between gap-4 shadow-xl">
+          <div className="flex items-center gap-3 text-right">
+            <div className="w-12 h-12 rounded-2xl bg-amber-500/20 text-amber-400 border border-amber-500/40 flex items-center justify-center shrink-0">
+              <Wifi className="w-6 h-6 animate-pulse" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-amber-300 bg-amber-500/20 border border-amber-500/30 px-2 py-0.5 rounded-full">
+                  دليل حل مشكلة الربط الفعلي
+                </span>
+                <span className="text-xs font-mono font-bold text-emerald-300 bg-emerald-500/20 border border-emerald-500/30 px-2 py-0.5 rounded-full">
+                  تحويل Not connected ➔ On Hook 🟢
+                </span>
+              </div>
+              <h3 className="text-sm font-bold text-white mt-1">
+                هل يظهر لك برنامج 3CXPhone رسالة "Not connected" وتريد تحويله إلى On Hook فوراً؟
+              </h3>
+              <p className="text-xs text-slate-300 mt-0.5">
+                اكتشفنا الخطأ الموجود في إعدادات Outbound Proxy وتطابق حقل ID مع التحويلة من صورتك • اضغط هنا للحصول على الحل وتنزيل ملف التكوين الجاهز.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => setIs3CXFixModalOpen(true)}
+              className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-cyan-500 hover:from-amber-400 hover:to-cyan-400 text-slate-950 font-black text-xs flex items-center gap-2 shadow-lg shadow-amber-500/25 transition-all active:scale-95 cursor-pointer"
+            >
+              <Wrench className="w-4 h-4" />
+              <span>حل مشكلة 3CX وتحويله إلى On Hook</span>
+            </button>
+          </div>
+        </div>
+
         {/* Incoming Call Screen-Pop Alert Banner (If Any) */}
         {incomingCall && (
           <div className="bg-gradient-to-r from-emerald-950/90 via-slate-900 to-cyan-950/90 border-2 border-emerald-500 rounded-2xl p-5 shadow-2xl animate-pulse">
@@ -284,6 +401,84 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
                 <span className="text-[11px] text-slate-400 font-mono">
                   SIP / {currentUser.protocol}
                 </span>
+              </div>
+
+              {/* Line Hook Status & Operator Switch */}
+              <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-3 mb-4 flex items-center justify-between gap-3 shadow-inner">
+                <div className="flex items-center gap-2.5">
+                  <div className={`w-3.5 h-3.5 rounded-full ${
+                    currentCall
+                      ? 'bg-red-500 animate-ping'
+                      : isOffHook
+                      ? 'bg-amber-400 animate-pulse'
+                      : 'bg-emerald-400 shadow-sm shadow-emerald-400/50'
+                  }`} />
+                  <div>
+                    <div className="text-[10px] text-slate-400 font-semibold">حالة الخط (Line Hook Status):</div>
+                    <div className="text-xs font-mono font-black flex items-center gap-1.5 mt-0.5">
+                      {currentCall ? (
+                        <span className="text-red-400">🔴 In Call (جاري المكالمة)</span>
+                      ) : isOffHook ? (
+                        <span className="text-amber-300">🟡 Off Hook (سماعة مرفوعة - حرارة)</span>
+                      ) : (
+                        <span className="text-emerald-400">🟢 On Hook (جاهز ومغلق)</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Hook Switch Toggle Button */}
+                <button
+                  onClick={handleToggleHook}
+                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md active:scale-95 ${
+                    currentCall || isOffHook
+                      ? 'bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/40 shadow-red-500/10'
+                      : 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 shadow-emerald-500/10'
+                  }`}
+                  title={isOffHook ? 'إنزال السماعة (Put On Hook)' : 'رفع السماعة وسماع نغمة البدالة (Take Off Hook)'}
+                >
+                  <Phone className="w-3.5 h-3.5" />
+                  <span>{isOffHook || currentCall ? 'إنزال السماعة (On Hook)' : 'رفع السماعة (Off Hook)'}</span>
+                </button>
+              </div>
+
+              {/* Live Mic Echo Test & Level Meter */}
+              <div className="bg-slate-950/60 border border-slate-800/80 rounded-2xl p-3 mb-4 flex flex-col gap-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Activity className="w-3.5 h-3.5 text-cyan-400" />
+                    <span className="text-xs font-bold text-slate-300">اختبار الميكروفون الحقيقي (Echo Test)</span>
+                  </div>
+                  <button
+                    onClick={handleToggleMicTest}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1 transition-all cursor-pointer ${
+                      isMicTesting
+                        ? 'bg-emerald-500 text-slate-950 shadow-md shadow-emerald-500/30'
+                        : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                    }`}
+                  >
+                    <Mic className="w-3 h-3" />
+                    <span>{isMicTesting ? 'إيقاف الاختبار' : 'اختبار الصوت الحي'}</span>
+                  </button>
+                </div>
+
+                {isMicTesting && (
+                  <div className="space-y-1.5 pt-1 animate-in fade-in">
+                    <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono">
+                      <span>مستوى التقاط الصوت:</span>
+                      <span className="text-emerald-400 font-bold">{micLevel}%</span>
+                    </div>
+                    <div className="h-2 w-full bg-slate-800 rounded-full overflow-hidden flex">
+                      <div
+                        className="h-full transition-all duration-75 rounded-full bg-gradient-to-r from-emerald-500 via-cyan-400 to-amber-400"
+                        style={{ width: `${Math.max(5, micLevel)}%` }}
+                      />
+                    </div>
+                    <p className="text-[10px] text-emerald-300 font-medium">
+                      ✓ الميكروفون متصل ويعمل! تحدث وستسمع صوتك مباشرة لاختبار الجودة.
+                    </p>
+                  </div>
+                )}
               </div>
 
               {/* Dial Input Field */}
@@ -604,6 +799,21 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
                     </button>
                   </div>
                 </div>
+
+                {/* Crucial Outbound Proxy Notice */}
+                <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between">
+                  <div className="text-[11px] font-sans">
+                    <span className="font-bold text-amber-300 block">تنبيه Outbound Proxy:</span>
+                    <span className="text-slate-300">يجب أن يكون خيار Outbound Proxy غير مفعل (Unchecked) في 3CXPhone.</span>
+                  </div>
+                  <button
+                    onClick={() => setIs3CXFixModalOpen(true)}
+                    className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 font-bold text-[11px] flex items-center gap-1 cursor-pointer"
+                  >
+                    <Wrench className="w-3 h-3" />
+                    <span>تفاصيل الإصلاح</span>
+                  </button>
+                </div>
               </div>
 
               {/* Status footer */}
@@ -612,9 +822,12 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
                   <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
                   <span>حالة الخط: <strong>On Hook / جاهز للاتصال</strong></span>
                 </div>
-                <span className="text-[11px] text-cyan-400 font-semibold">
-                  مزامنة تلقائية مع سيرفر Asterisk
-                </span>
+                <button
+                  onClick={() => setIs3CXFixModalOpen(true)}
+                  className="text-[11px] text-cyan-400 hover:text-cyan-300 font-bold underline cursor-pointer"
+                >
+                  حل مشكلة Not Connected في 3CX ➔
+                </button>
               </div>
             </div>
 
@@ -670,6 +883,13 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
           </div>
         </div>
       </main>
+
+      {/* 3CX Diagnostics and Fix Modal */}
+      <ThreeCXDiagnosticModal
+        isOpen={is3CXFixModalOpen}
+        onClose={() => setIs3CXFixModalOpen(false)}
+        currentUser={currentUser}
+      />
     </div>
   );
 };

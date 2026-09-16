@@ -325,3 +325,185 @@ export function stopSpeech() {
     window.speechSynthesis.cancel();
   }
 }
+
+// Continuous Dial Tone (350Hz + 440Hz standard PBX Off-Hook tone)
+let dialToneOsc1: OscillatorNode | null = null;
+let dialToneOsc2: OscillatorNode | null = null;
+let dialToneGain: GainNode | null = null;
+
+export function startDialTone() {
+  stopDialTone();
+  try {
+    const ctx = getAudioContext();
+    if (!ctx) return;
+
+    dialToneOsc1 = ctx.createOscillator();
+    dialToneOsc2 = ctx.createOscillator();
+    dialToneGain = ctx.createGain();
+
+    dialToneOsc1.type = 'sine';
+    dialToneOsc1.frequency.value = 350;
+
+    dialToneOsc2.type = 'sine';
+    dialToneOsc2.frequency.value = 440;
+
+    const now = ctx.currentTime;
+    dialToneGain.gain.setValueAtTime(0.04, now);
+
+    dialToneOsc1.connect(dialToneGain);
+    dialToneOsc2.connect(dialToneGain);
+    dialToneGain.connect(ctx.destination);
+
+    dialToneOsc1.start();
+    dialToneOsc2.start();
+  } catch (err) {
+    console.debug('Failed to start dial tone', err);
+  }
+}
+
+export function stopDialTone() {
+  try {
+    if (dialToneOsc1) {
+      dialToneOsc1.stop();
+      dialToneOsc1.disconnect();
+      dialToneOsc1 = null;
+    }
+    if (dialToneOsc2) {
+      dialToneOsc2.stop();
+      dialToneOsc2.disconnect();
+      dialToneOsc2 = null;
+    }
+    if (dialToneGain) {
+      dialToneGain.disconnect();
+      dialToneGain = null;
+    }
+  } catch {
+    // ignore
+  }
+}
+
+// Busy Tone (480Hz + 620Hz, 0.5s on, 0.5s off)
+let busyToneTimer: number | null = null;
+
+export function startBusyTone() {
+  stopBusyTone();
+  const playPulse = () => {
+    try {
+      const ctx = getAudioContext();
+      if (!ctx) return;
+      const osc1 = ctx.createOscillator();
+      const osc2 = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      osc1.type = 'sine';
+      osc1.frequency.value = 480;
+      osc2.type = 'sine';
+      osc2.frequency.value = 620;
+
+      const now = ctx.currentTime;
+      gain.gain.setValueAtTime(0.06, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.48);
+
+      osc1.connect(gain);
+      osc2.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc1.start(now);
+      osc2.start(now);
+      osc1.stop(now + 0.5);
+      osc2.stop(now + 0.5);
+    } catch {
+      // ignore
+    }
+  };
+
+  playPulse();
+  busyToneTimer = window.setInterval(playPulse, 1000);
+}
+
+export function stopBusyTone() {
+  if (busyToneTimer !== null) {
+    clearInterval(busyToneTimer);
+    busyToneTimer = null;
+  }
+}
+
+// Live Microphone Echo Test & Level Analyzer
+let micStream: MediaStream | null = null;
+let micAnimationId: number | null = null;
+
+export async function startLiveMicTest(
+  onLevelChange: (levelPercent: number) => void,
+  enableEchoPlayback: boolean = false
+): Promise<{ stop: () => void }> {
+  const ctx = getAudioContext();
+  if (!ctx || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error('Web Audio / Mic API not supported in this browser');
+  }
+
+  // Request mic permission
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+  });
+
+  const source = ctx.createMediaStreamSource(micStream);
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 256;
+  source.connect(analyser);
+
+  let echoGain: GainNode | null = null;
+  if (enableEchoPlayback) {
+    echoGain = ctx.createGain();
+    echoGain.gain.value = 0.25; // Safe comfortable echo level
+    analyser.connect(echoGain);
+    echoGain.connect(ctx.destination);
+  }
+
+  const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+  const checkVolume = () => {
+    analyser.getByteFrequencyData(dataArray);
+    let sum = 0;
+    for (let i = 0; i < dataArray.length; i++) {
+      sum += dataArray[i];
+    }
+    const average = sum / dataArray.length;
+    // Map 0-128 to 0-100%
+    const percent = Math.min(100, Math.round((average / 120) * 100));
+    onLevelChange(percent);
+    micAnimationId = requestAnimationFrame(checkVolume);
+  };
+
+  checkVolume();
+
+  const stop = () => {
+    if (micAnimationId) {
+      cancelAnimationFrame(micAnimationId);
+      micAnimationId = null;
+    }
+    if (echoGain) {
+      try {
+        echoGain.disconnect();
+      } catch {
+        // ignore
+      }
+    }
+    try {
+      source.disconnect();
+      analyser.disconnect();
+    } catch {
+      // ignore
+    }
+    if (micStream) {
+      micStream.getTracks().forEach((t) => t.stop());
+      micStream = null;
+    }
+    onLevelChange(0);
+  };
+
+  return { stop };
+}
