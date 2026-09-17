@@ -22,16 +22,18 @@ interface SoftphoneModalProps {
   isOpen: boolean;
   onClose: () => void;
   currentUser: PBXUser;
-  users: PBXUser[];
-  onMakeCall: (destinationNumber: string, destinationName?: string) => void;
+  users?: PBXUser[];
+  onMakeCall?: (destinationNumber: string, destinationName?: string) => void;
+  onCallInitiated?: (destinationNumber: string, destinationName?: string) => void;
 }
 
 export const SoftphoneModal: React.FC<SoftphoneModalProps> = ({
   isOpen,
   onClose,
   currentUser,
-  users,
+  users = [],
   onMakeCall,
+  onCallInitiated,
 }) => {
   const [dialNumber, setDialNumber] = useState('');
   const [isMuted, setIsMuted] = useState(false);
@@ -54,20 +56,24 @@ export const SoftphoneModal: React.FC<SoftphoneModalProps> = ({
 
   const handleCall = () => {
     if (!dialNumber.trim()) return;
-    setIsDialing(true);
-    startRingback();
+    const cleanNum = dialNumber.trim();
+    const cleanDigits = cleanNum.replace(/[^0-9a-zA-Z]/g, '').trim();
 
     // Check if dialNumber matches an extension or user
-    const matchedUser = users.find((u) => u.extension === dialNumber.trim());
-    const destName = matchedUser ? matchedUser.name : `خط خارجي (${dialNumber})`;
+    const matchedUser = users?.find(
+      (u) =>
+        u.extension.replace(/[^0-9a-zA-Z]/g, '').trim() === cleanDigits ||
+        u.name.trim().toLowerCase() === cleanNum.toLowerCase()
+    );
+    const destName = matchedUser ? matchedUser.name : undefined;
 
-    setTimeout(() => {
-      stopRingback();
-      playTelephonyFx('connected');
-      setIsDialing(false);
-      onMakeCall(dialNumber.trim(), destName);
-      onClose();
-    }, 2800);
+    if (onMakeCall) {
+      onMakeCall(cleanNum, destName);
+    } else if (onCallInitiated) {
+      onCallInitiated(cleanNum, destName);
+    }
+    setDialNumber('');
+    onClose();
   };
 
   const handleCancelDialing = () => {

@@ -179,30 +179,99 @@ export async function removeActiveCall(callId: string): Promise<void> {
 }
 
 /**
- * Subscribe to active calls in real time (Firestore + Local Broadcast + Storage event)
+ * Subscribe to active calls in real time (Firestore + Realtime Database + Local Broadcast + Storage event)
  */
 export function subscribeActiveCalls(
   onUpdate: (calls: Call[]) => void
 ): () => void {
-  // Listen to Firestore active_calls
-  const colRef = collection(db, 'active_calls');
-  const unsubFirestore = onSnapshot(colRef, (snapshot) => {
-    const list: Call[] = [];
-    snapshot.forEach((d) => {
-      list.push(d.data() as Call);
-    });
-    onUpdate(list);
-  }, (err) => {
-    console.warn('active_calls firestore snapshot note:', err.message);
-  });
+  let firestoreCalls: Call[] = [];
+  let rtdbCalls: Call[] = [];
+  let localCalls: Call[] = [];
 
-  // Also listen to local storage storage events (for cross-tab reliability)
+  const emitMerged = () => {
+    const callMap = new Map<string, Call>();
+
+    // 1. First add local calls
+    localCalls.forEach((c) => {
+      if (c && c.id) callMap.set(c.id, c);
+    });
+
+    // 2. Overlay Firestore calls
+    firestoreCalls.forEach((c) => {
+      if (c && c.id) callMap.set(c.id, c);
+    });
+
+    // 3. Overlay Realtime Database calls (sub-millisecond latency)
+    rtdbCalls.forEach((c) => {
+      if (c && c.id) callMap.set(c.id, c);
+    });
+
+    const merged = Array.from(callMap.values()).filter(
+      (c) => c.status !== 'ended' && c.status !== 'missed'
+    );
+    onUpdate(merged);
+  };
+
+  // Immediate read from localStorage
+  try {
+    const raw = localStorage.getItem('etsalati_active_calls');
+    if (raw) {
+      localCalls = JSON.parse(raw);
+      emitMerged();
+    }
+  } catch {
+    // ignore
+  }
+
+  // 1. Listen to Firestore active_calls
+  let unsubFirestore = () => {};
+  try {
+    const colRef = collection(db, 'active_calls');
+    unsubFirestore = onSnapshot(colRef, (snapshot) => {
+      const list: Call[] = [];
+      snapshot.forEach((d) => {
+        list.push(d.data() as Call);
+      });
+      firestoreCalls = list;
+      emitMerged();
+    }, (err) => {
+      console.warn('active_calls firestore snapshot note:', err.message);
+    });
+  } catch (err) {
+    console.warn('Firestore active_calls subscribe error:', err);
+  }
+
+  // 2. Listen to Firebase Realtime Database activeCalls
+  let unsubRtdb = () => {};
+  try {
+    const rtdbActiveCallsRef = ref(rtdb, 'activeCalls');
+    unsubRtdb = onValue(rtdbActiveCallsRef, (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.val();
+        if (data && typeof data === 'object') {
+          rtdbCalls = Object.values(data) as Call[];
+        } else {
+          rtdbCalls = [];
+        }
+      } else {
+        rtdbCalls = [];
+      }
+      emitMerged();
+    }, (err) => {
+      console.warn('RTDB activeCalls snapshot note:', err.message);
+    });
+  } catch (err) {
+    console.warn('RTDB activeCalls subscribe error:', err);
+  }
+
+  // 3. Listen to local storage storage events (for instant cross-tab reliability on same browser)
   const handleStorage = (e: StorageEvent) => {
     if (e.key === 'etsalati_active_calls' && e.newValue) {
       try {
         const calls = JSON.parse(e.newValue);
         if (Array.isArray(calls)) {
-          onUpdate(calls);
+          localCalls = calls;
+          emitMerged();
         }
       } catch {
         // ignore
@@ -210,11 +279,33 @@ export function subscribeActiveCalls(
     }
   };
 
+  // 4. In-page CustomEvent bus
+  const handleCustomBus = (e: Event) => {
+    try {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.type === 'CALL_INITIATED' && detail.call) {
+        localCalls = [detail.call, ...localCalls.filter((c) => c.id !== detail.call.id)];
+        emitMerged();
+      } else if (detail?.type === 'CALL_UPDATED' && detail.callId) {
+        localCalls = localCalls.map((c) => (c.id === detail.callId ? { ...c, ...detail.updates } : c));
+        emitMerged();
+      } else if (detail?.type === 'CALL_REMOVED' && detail.callId) {
+        localCalls = localCalls.filter((c) => c.id !== detail.callId);
+        emitMerged();
+      }
+    } catch {
+      // ignore
+    }
+  };
+
   window.addEventListener('storage', handleStorage);
+  window.addEventListener('etsalati_call_bus', handleCustomBus);
 
   return () => {
-    unsubFirestore();
+    if (typeof unsubFirestore === 'function') unsubFirestore();
+    if (typeof unsubRtdb === 'function') unsubRtdb();
     window.removeEventListener('storage', handleStorage);
+    window.removeEventListener('etsalati_call_bus', handleCustomBus);
   };
 }
 
@@ -367,6 +458,12 @@ export async function autoSaveUserToFirebase(user: PBXUser): Promise<boolean> {
       console.warn('Realtime Database mirror notice:', rtdbErr);
     }
 
+    try {
+      callBus?.postMessage({ type: 'USER_SAVED', user });
+    } catch {
+      // ignore
+    }
+
     console.log(`✅ [Firebase Sync] User ${user.name} (${user.extension}) automatically saved to Firestore!`);
     return true;
   } catch (error) {
@@ -412,15 +509,19 @@ export async function deleteUserFromFirebase(user: PBXUser): Promise<boolean> {
 }
 
 /**
- * Real-time listener for users collection in Firestore
+ * Real-time listener for users collection in Firestore & Realtime Database
  */
 export function subscribeUsersFromFirebase(
   onUpdate: (users: PBXUser[]) => void,
   onError?: (err: Error) => void
-) {
+): () => void {
+  let unsubFirestore = () => {};
+  let unsubRtdb = () => {};
+
+  // 1. Firestore Users Listener
   try {
     const usersCol = collection(db, 'users');
-    return onSnapshot(
+    unsubFirestore = onSnapshot(
       usersCol,
       (snapshot) => {
         if (!snapshot.empty) {
@@ -439,8 +540,56 @@ export function subscribeUsersFromFirebase(
     );
   } catch (err) {
     console.warn('Failed to attach Firebase snapshot listener:', err);
-    return () => {};
   }
+
+  // 2. Realtime Database Users Listener
+  try {
+    const rtdbUsersRef = ref(rtdb, 'users');
+    unsubRtdb = onValue(rtdbUsersRef, (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.val();
+        if (data && typeof data === 'object') {
+          const list = Object.values(data) as PBXUser[];
+          if (list.length > 0) {
+            onUpdate(list);
+          }
+        }
+      }
+    });
+  } catch (err) {
+    console.warn('RTDB Users subscribe error:', err);
+  }
+
+  // 3. LocalStorage & Custom Event cross-tab sync
+  const handleStorage = (e: StorageEvent) => {
+    if (e.key === 'etsalati_users' && e.newValue) {
+      try {
+        const list = JSON.parse(e.newValue);
+        if (Array.isArray(list) && list.length > 0) {
+          onUpdate(list);
+        }
+      } catch {
+        // ignore
+      }
+    }
+  };
+
+  const handleCustom = (e: Event) => {
+    const custom = e as CustomEvent;
+    if (custom.detail && Array.isArray(custom.detail)) {
+      onUpdate(custom.detail);
+    }
+  };
+
+  window.addEventListener('storage', handleStorage);
+  window.addEventListener('etsalati_users_update', handleCustom);
+
+  return () => {
+    if (typeof unsubFirestore === 'function') unsubFirestore();
+    if (typeof unsubRtdb === 'function') unsubRtdb();
+    window.removeEventListener('storage', handleStorage);
+    window.removeEventListener('etsalati_users_update', handleCustom);
+  };
 }
 
 /**

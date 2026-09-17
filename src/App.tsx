@@ -56,6 +56,9 @@ import {
 } from './lib/firebase';
 import { webrtcVoice } from './utils/webrtcVoiceService';
 
+// Helper to normalize extension strings (removes '#', spaces, etc.)
+const cleanExt = (e?: string | number) => (e ? String(e).replace(/[^0-9a-zA-Z]/g, '').trim().toLowerCase() : '');
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
     const validTabs: ActiveTab[] = [
@@ -334,19 +337,26 @@ export default function App() {
     const processLiveCalls = (liveCalls: Call[]) => {
       const user = currentUserRef.current;
       if (!user) return;
-      const myExt = String(user.extension).trim();
-      const myName = String(user.name).trim();
-      const myUser = String(user.username || '').trim();
+      const myExt = cleanExt(user.extension);
+      const myName = String(user.name).trim().toLowerCase();
+      const myUser = String(user.username || '').trim().toLowerCase();
 
       // Check if there is an incoming call ringing for this user:
       const incoming = liveCalls.find((c) => {
         if (c.status !== 'ringing') return false;
-        if (c.callerExtension && String(c.callerExtension).trim() === myExt) return false;
+        const callerExt = cleanExt(c.callerExtension || c.extension);
+        if (callerExt && callerExt === myExt) return false;
         if (String(c.extension).trim() === myExt && c.direction === 'outbound') return false;
 
-        const calleeExt = String(c.calleeExtension || '').trim();
-        const calleeName = String(c.calleeName || '').trim();
-        return calleeExt === myExt || calleeName === myName || (myUser && calleeExt === myUser);
+        const calleeExt = cleanExt(c.calleeExtension);
+        const calleeExtAlt = cleanExt(c.extension);
+        const calleeName = String(c.calleeName || '').trim().toLowerCase();
+
+        const isTargetExt = myExt && (calleeExt === myExt || calleeExtAlt === myExt);
+        const isTargetName = myName && (calleeName === myName || calleeName.includes(myName));
+        const isTargetUser = myUser && (calleeExt === myUser || calleeName === myUser);
+
+        return isTargetExt || isTargetName || isTargetUser;
       });
 
       if (incoming) {
@@ -384,8 +394,10 @@ export default function App() {
 
         // If a remote call was accepted and involves this user as callee
         liveCalls.forEach((rc) => {
+          const rcExt = cleanExt(rc.extension);
+          const rcCalleeExt = cleanExt(rc.calleeExtension);
           if (
-            (String(rc.extension).trim() === myExt || String(rc.calleeExtension).trim() === myExt) &&
+            (rcExt === myExt || rcCalleeExt === myExt) &&
             rc.status === 'connected' &&
             !next.some((c) => c.id === rc.id)
           ) {
@@ -406,16 +418,22 @@ export default function App() {
       if (!data) return;
       const user = currentUserRef.current;
       if (!user) return;
-      const myExt = String(user.extension).trim();
-      const myName = String(user.name).trim();
-      const myUser = String(user.username || '').trim();
+      const myExt = cleanExt(user.extension);
+      const myName = String(user.name).trim().toLowerCase();
+      const myUser = String(user.username || '').trim().toLowerCase();
 
       if (data.type === 'CALL_INITIATED') {
         const call: Call = data.call;
-        const calleeExt = String(call.calleeExtension || '').trim();
-        const calleeName = String(call.calleeName || '').trim();
-        const isTarget = calleeExt === myExt || calleeName === myName || (myUser && calleeExt === myUser);
-        const isNotSelf = String(call.callerExtension).trim() !== myExt;
+        const calleeExt = cleanExt(call.calleeExtension);
+        const calleeExtAlt = cleanExt(call.extension);
+        const calleeName = String(call.calleeName || '').trim().toLowerCase();
+        const callerExt = cleanExt(call.callerExtension || call.extension);
+
+        const isTargetExt = myExt && (calleeExt === myExt || calleeExtAlt === myExt);
+        const isTargetName = myName && (calleeName === myName || calleeName.includes(myName));
+        const isTargetUser = myUser && (calleeExt === myUser || calleeName === myUser);
+        const isTarget = isTargetExt || isTargetName || isTargetUser;
+        const isNotSelf = !callerExt || callerExt !== myExt;
 
         if (isTarget && isNotSelf && call.status === 'ringing') {
           setIncomingCall(call);
@@ -526,16 +544,24 @@ export default function App() {
   const handleMakeCall = (number: string, name?: string) => {
     if (!currentUser) return;
     const cleanNum = number.trim();
+    const cleanDigits = cleanExt(cleanNum);
 
     // Check if the dialed number matches an employee / extension in the system
-    const targetUser = users.find(
-      (u) =>
-        u.extension.trim() === cleanNum ||
-        (u.username && u.username.trim() === cleanNum) ||
-        u.name.trim() === cleanNum
-    );
+    const targetUser = users.find((u) => {
+      const uExt = cleanExt(u.extension);
+      const uName = String(u.name || '').trim().toLowerCase();
+      const uUser = String(u.username || '').trim().toLowerCase();
+      const targetQuery = cleanNum.toLowerCase();
 
-    const isInternal = !!targetUser;
+      return (
+        (cleanDigits && uExt === cleanDigits) ||
+        uName === targetQuery ||
+        (uUser && uUser === targetQuery) ||
+        u.id === cleanNum
+      );
+    });
+
+    const isInternal = !!targetUser || /^\d{2,6}$/.test(cleanDigits);
     const callCode = generateCallCode();
 
     const newCall: Call = {
@@ -546,22 +572,18 @@ export default function App() {
       callerExtension: currentUser.extension,
       extension: currentUser.extension,
       calleeExtension: targetUser ? targetUser.extension : cleanNum,
-      calleeName: targetUser ? targetUser.name : (name || `خطي خارجي (${cleanNum})`),
+      calleeName: targetUser ? targetUser.name : (name || (isInternal ? `التحويلة #${cleanDigits || cleanNum}` : `رقم خارجي (${cleanNum})`)),
       direction: 'outbound',
-      status: isInternal ? 'ringing' : 'connected',
-      duration: isInternal ? 0 : 1,
+      status: 'ringing', // ALWAYS start in ringing state so that callee rings and caller hears ringback!
+      duration: 0,
       startTime: new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' }),
       channelId: `PJSIP/${currentUser.extension}-000000${Math.floor(Math.random() * 90 + 10)}`,
       isRecording: true,
       isAppToApp: isInternal,
     };
 
-    if (isInternal) {
-      // Caller hears PBX ringback tone while waiting for the employee to answer
-      startRingback();
-    } else {
-      playTelephonyFx('connected');
-    }
+    // Caller hears PBX ringback tone (طنين الانتظار) while waiting for the employee to answer:
+    startRingback();
 
     setActiveCalls((prev) => [newCall, ...prev.filter((c) => c.id !== newCall.id)]);
     publishActiveCall(newCall);
@@ -902,8 +924,9 @@ export default function App() {
         isOpen={isSoftphoneOpen}
         onClose={() => setIsSoftphoneOpen(false)}
         currentUser={currentUser}
-        onCallInitiated={(number) => {
-          handleMakeCall(number);
+        users={users}
+        onMakeCall={(number, name) => {
+          handleMakeCall(number, name);
           setActiveTab('calls');
         }}
       />

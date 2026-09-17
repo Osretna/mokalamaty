@@ -72,19 +72,18 @@ export const CallManagerView: React.FC<CallManagerViewProps> = ({
 
   const handleCall = () => {
     if (!dialNumber.trim()) return;
-    setIsDialing(true);
-    startRingback();
+    const cleanNum = dialNumber.trim();
+    const cleanDigits = cleanNum.replace(/[^0-9a-zA-Z]/g, '').trim();
+    const matched = users.find(
+      (u) =>
+        u.extension.replace(/[^0-9a-zA-Z]/g, '').trim() === cleanDigits ||
+        u.name.trim().toLowerCase() === cleanNum.toLowerCase() ||
+        (u.username && u.username.trim().toLowerCase() === cleanNum.toLowerCase())
+    );
+    const destName = matched ? matched.name : undefined;
 
-    const matched = users.find((u) => u.extension === dialNumber.trim());
-    const destName = matched ? matched.name : `رقم خارجي (${dialNumber})`;
-
-    setTimeout(() => {
-      stopRingback();
-      playTelephonyFx('connected');
-      setIsDialing(false);
-      onMakeCall(dialNumber.trim(), destName);
-      setDialNumber('');
-    }, 2500);
+    onMakeCall(cleanNum, destName);
+    setDialNumber('');
   };
 
   const formatDuration = (sec: number) => {
@@ -367,10 +366,16 @@ export const CallManagerView: React.FC<CallManagerViewProps> = ({
                             className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                               call.status === 'on_hold'
                                 ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                                : call.status === 'ringing'
+                                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse'
                                 : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
                             }`}
                           >
-                            {call.status === 'on_hold' ? 'انتظار (Music on Hold)' : 'جارية (Live)'}
+                            {call.status === 'on_hold'
+                              ? 'انتظار (Music on Hold)'
+                              : call.status === 'ringing'
+                              ? 'جاري الرنين (Ringing...)'
+                              : 'جارية (Live)'}
                           </span>
                         </div>
 

@@ -86,14 +86,24 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
   const [speakerVolume, setSpeakerVolume] = useState<number>(1);
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
 
+  // Helper to normalize extension strings (removes '#', spaces, etc.)
+  const cleanExt = (e?: string | number) => (e ? String(e).replace(/[^0-9a-zA-Z]/g, '').trim().toLowerCase() : '');
+  const myExtNorm = cleanExt(currentUser.extension);
+  const myNameNorm = String(currentUser.name || '').trim().toLowerCase();
+
   // Find active call for this agent's extension (either as caller or as callee)
-  const currentCall = activeCalls.find(
-    (c) =>
-      (String(c.extension).trim() === String(currentUser.extension).trim() ||
-       String(c.calleeExtension).trim() === String(currentUser.extension).trim()) &&
-      c.status !== 'ended' &&
-      c.status !== 'missed'
-  );
+  const currentCall = activeCalls.find((c) => {
+    if (c.status === 'ended' || c.status === 'missed') return false;
+    const callerExt = cleanExt(c.callerExtension || c.extension);
+    const calleeExt = cleanExt(c.calleeExtension);
+    const calleeName = String(c.calleeName || '').trim().toLowerCase();
+    const callerName = String(c.callerName || '').trim().toLowerCase();
+
+    return (
+      (myExtNorm && (callerExt === myExtNorm || calleeExt === myExtNorm)) ||
+      (myNameNorm && (calleeName === myNameNorm || callerName === myNameNorm))
+    );
+  });
 
   // Connect real two-way microphone audio as soon as call is answered ('connected')
   useEffect(() => {
@@ -173,11 +183,12 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
   const handleCall = () => {
     if (!dialNumber.trim()) return;
     const cleanNum = dialNumber.trim();
+    const cleanDigits = cleanExt(cleanNum);
     const target = users.find(
       (u) =>
-        u.extension.trim() === cleanNum ||
-        (u.username && u.username.trim() === cleanNum) ||
-        u.name.trim() === cleanNum
+        cleanExt(u.extension) === cleanDigits ||
+        (u.username && u.username.trim().toLowerCase() === cleanNum.toLowerCase()) ||
+        u.name.trim().toLowerCase() === cleanNum.toLowerCase()
     );
     setLastDialed(cleanNum);
     onMakeCall(cleanNum, target ? target.name : undefined);
