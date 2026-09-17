@@ -9,11 +9,12 @@ import {
   query, 
   orderBy,
   serverTimestamp,
-  enableIndexedDbPersistence
+  deleteDoc,
+  updateDoc,
 } from 'firebase/firestore';
-import { getDatabase, ref, set, onValue } from 'firebase/database';
+import { getDatabase, ref, set, onValue, remove, update } from 'firebase/database';
 import { getAuth } from 'firebase/auth';
-import { Call, PBXUser } from '../types';
+import { Call, PBXUser, CallStatus } from '../types';
 
 // The Firebase configuration provided by the user
 export const firebaseConfig = {
@@ -32,6 +33,182 @@ export const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 export const db = getFirestore(app);
 export const rtdb = getDatabase(app);
 export const auth = getAuth(app);
+
+// Instant cross-tab communication bus for App-to-App calling
+const CALL_BUS_NAME = 'etsalati_app_to_app_calls';
+export const callBus = typeof window !== 'undefined' && 'BroadcastChannel' in window
+  ? new BroadcastChannel(CALL_BUS_NAME)
+  : null;
+
+/**
+ * Publish Live Call across all tabs and Firebase (Firestore + RTDB)
+ */
+export async function publishActiveCall(call: Call): Promise<void> {
+  // 1. Broadcast locally across browser tabs immediately (0ms)
+  try {
+    callBus?.postMessage({ type: 'CALL_INITIATED', call });
+  } catch (e) {
+    console.debug('Broadcast error', e);
+  }
+
+  // 2. Publish to Firestore active_calls collection
+  try {
+    const callRef = doc(db, 'active_calls', call.id);
+    await setDoc(callRef, {
+      ...call,
+      updatedAt: new Date().toISOString(),
+    }, { merge: true });
+  } catch (e) {
+    console.warn('Firestore active_calls write warning:', e);
+  }
+
+  // 3. Mirror to Realtime Database
+  try {
+    const rtdbRef = ref(rtdb, `activeCalls/${call.id}`);
+    await set(rtdbRef, {
+      ...call,
+      updatedAt: Date.now(),
+    });
+  } catch (e) {
+    // RTDB fallback
+  }
+}
+
+/**
+ * Update active call status (e.g. ringing -> connected -> ended)
+ */
+export async function updateActiveCall(callId: string, updates: Partial<Call>): Promise<void> {
+  try {
+    callBus?.postMessage({ type: 'CALL_UPDATED', callId, updates });
+  } catch (e) {
+    console.debug('Broadcast error', e);
+  }
+
+  try {
+    const callRef = doc(db, 'active_calls', callId);
+    await setDoc(callRef, {
+      ...updates,
+      updatedAt: new Date().toISOString(),
+    }, { merge: true });
+  } catch (e) {
+    console.warn('Firestore active_calls update warning:', e);
+  }
+
+  try {
+    const rtdbRef = ref(rtdb, `activeCalls/${callId}`);
+    await update(rtdbRef, {
+      ...updates,
+      updatedAt: Date.now(),
+    });
+  } catch (e) {
+    // ignore
+  }
+}
+
+/**
+ * Remove active call once finished
+ */
+export async function removeActiveCall(callId: string): Promise<void> {
+  try {
+    callBus?.postMessage({ type: 'CALL_REMOVED', callId });
+  } catch (e) {
+    console.debug('Broadcast error', e);
+  }
+
+  try {
+    const callRef = doc(db, 'active_calls', callId);
+    await deleteDoc(callRef);
+  } catch (e) {
+    // ignore
+  }
+
+  try {
+    const rtdbRef = ref(rtdb, `activeCalls/${callId}`);
+    await remove(rtdbRef);
+  } catch (e) {
+    // ignore
+  }
+}
+
+/**
+ * Subscribe to active calls in real time (Firestore + Local Broadcast)
+ */
+export function subscribeActiveCalls(
+  onUpdate: (calls: Call[]) => void
+): () => void {
+  // Listen to Firestore active_calls
+  const colRef = collection(db, 'active_calls');
+  const unsubFirestore = onSnapshot(colRef, (snapshot) => {
+    const list: Call[] = [];
+    snapshot.forEach((d) => {
+      list.push(d.data() as Call);
+    });
+    onUpdate(list);
+  }, (err) => {
+    console.warn('active_calls firestore snapshot note:', err.message);
+  });
+
+  return () => {
+    unsubFirestore();
+  };
+}
+
+/**
+ * Send heartbeat for Online User Presence
+ */
+export function sendUserPresenceHeartbeat(user: PBXUser) {
+  if (!user || !user.extension) return;
+  const presenceData = {
+    extension: user.extension,
+    name: user.name,
+    role: user.role,
+    lastSeen: Date.now(),
+    status: 'online',
+  };
+
+  // 1. Broadcast locally
+  try {
+    callBus?.postMessage({ type: 'PRESENCE_HEARTBEAT', presence: presenceData });
+  } catch (e) {
+    // ignore
+  }
+
+  // 2. Mirror to Realtime Database / Firestore
+  try {
+    const rtdbRef = ref(rtdb, `presence/${user.extension}`);
+    set(rtdbRef, presenceData).catch(() => {});
+  } catch {
+    // ignore
+  }
+
+  try {
+    const docRef = doc(db, 'presence', user.extension);
+    setDoc(docRef, presenceData, { merge: true }).catch(() => {});
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Subscribe to online presence
+ */
+export function subscribeOnlinePresence(
+  onUpdate: (onlineMap: Record<string, { lastSeen: number; name: string; extension: string }>) => void
+): () => void {
+  const presenceCol = collection(db, 'presence');
+  const unsub = onSnapshot(presenceCol, (snapshot) => {
+    const map: Record<string, { lastSeen: number; name: string; extension: string }> = {};
+    snapshot.forEach((d) => {
+      const data = d.data() as { lastSeen: number; name: string; extension: string };
+      map[data.extension] = data;
+    });
+    onUpdate(map);
+  }, () => {
+    // ignore
+  });
+
+  return () => unsub();
+}
 
 /**
  * Automatically save a user / extension to Firebase Firestore and Realtime Database

@@ -36,12 +36,23 @@ import {
   stopIncomingRing,
   startHoldMusic,
   stopHoldMusic,
+  startRingback,
+  stopRingback,
+  startBusyTone,
+  stopBusyTone,
 } from './utils/audioTones';
 import {
   autoSaveUserToFirebase,
   autoSaveCallToFirebase,
   subscribeUsersFromFirebase,
   generateCallCode,
+  publishActiveCall,
+  updateActiveCall,
+  removeActiveCall,
+  subscribeActiveCalls,
+  sendUserPresenceHeartbeat,
+  subscribeOnlinePresence,
+  callBus,
 } from './lib/firebase';
 
 export default function App() {
@@ -84,6 +95,9 @@ export default function App() {
     const saved = localStorage.getItem('etsalati_users');
     return saved ? JSON.parse(saved) : INITIAL_USERS;
   });
+
+  // Online employees presence map
+  const [onlineUsers, setOnlineUsers] = useState<Record<string, { lastSeen: number; name: string; extension: string }>>({});
 
   const [currentUser, setCurrentUser] = useState<PBXUser | null>(() => {
     const saved = localStorage.getItem('etsalati_logged_in_user');
@@ -204,6 +218,128 @@ export default function App() {
     return () => clearInterval(amiInterval);
   }, []);
 
+  // Heartbeat & Online Presence
+  useEffect(() => {
+    if (!currentUser) return;
+    sendUserPresenceHeartbeat(currentUser);
+    const interval = setInterval(() => {
+      sendUserPresenceHeartbeat(currentUser);
+    }, 10000);
+
+    const unsubPresence = subscribeOnlinePresence((map) => {
+      setOnlineUsers(map);
+    });
+
+    return () => {
+      clearInterval(interval);
+      unsubPresence();
+    };
+  }, [currentUser]);
+
+  // Real-time Active Calls Listener (Firebase Firestore + BroadcastChannel for same-device cross-tab)
+  useEffect(() => {
+    if (!currentUser) return;
+
+    // 1. Subscribe to Firestore active_calls
+    const unsubCalls = subscribeActiveCalls((liveCalls) => {
+      // Check if there is an incoming call ringing for this user:
+      const incoming = liveCalls.find(
+        (c) => c.calleeExtension === currentUser.extension && c.status === 'ringing'
+      );
+      if (incoming) {
+        setIncomingCall(incoming);
+        startIncomingRing();
+      } else if (incomingCall && !liveCalls.some((c) => c.id === incomingCall.id && c.status === 'ringing')) {
+        stopIncomingRing();
+        setIncomingCall(null);
+      }
+
+      // Check if our outbound call was answered by the other party:
+      setActiveCalls((prev) => {
+        let changed = false;
+        const next = prev
+          .map((localCall) => {
+            const remote = liveCalls.find((lc) => lc.id === localCall.id);
+            if (remote) {
+              if (localCall.status === 'ringing' && remote.status === 'connected') {
+                stopRingback();
+                playTelephonyFx('connected');
+                changed = true;
+                return { ...localCall, status: 'connected', duration: remote.duration || 1 };
+              }
+              if (remote.status === 'ended' || remote.status === 'missed') {
+                stopRingback();
+                stopIncomingRing();
+                playTelephonyFx('hangup');
+                changed = true;
+                return { ...localCall, status: remote.status };
+              }
+            }
+            return localCall;
+          })
+          .filter((c) => c.status !== 'ended' && c.status !== 'missed');
+
+        // If a remote call was accepted and involves this user as callee
+        liveCalls.forEach((rc) => {
+          if (
+            (rc.extension === currentUser.extension || rc.calleeExtension === currentUser.extension) &&
+            rc.status === 'connected' &&
+            !next.some((c) => c.id === rc.id)
+          ) {
+            next.push(rc);
+            changed = true;
+          }
+        });
+
+        return changed ? next : prev;
+      });
+    });
+
+    // 2. BroadcastChannel message handler for 0ms cross-tab instant communication
+    const handleBusMessage = (event: MessageEvent) => {
+      const data = event.data;
+      if (!data) return;
+
+      if (data.type === 'CALL_INITIATED') {
+        const call: Call = data.call;
+        if (call.calleeExtension === currentUser.extension && call.status === 'ringing') {
+          setIncomingCall(call);
+          startIncomingRing();
+        }
+      } else if (data.type === 'CALL_UPDATED') {
+        const { callId, updates } = data;
+        if (updates.status === 'connected') {
+          stopRingback();
+          stopIncomingRing();
+          playTelephonyFx('connected');
+        } else if (updates.status === 'ended' || updates.status === 'missed') {
+          stopRingback();
+          stopIncomingRing();
+          playTelephonyFx('hangup');
+          setIncomingCall(null);
+        }
+        setActiveCalls((prev) =>
+          prev
+            .map((c) => (c.id === callId ? { ...c, ...updates } : c))
+            .filter((c) => c.status !== 'ended' && c.status !== 'missed')
+        );
+      } else if (data.type === 'CALL_REMOVED') {
+        setActiveCalls((prev) => prev.filter((c) => c.id !== data.callId));
+        if (incomingCall && incomingCall.id === data.callId) {
+          stopIncomingRing();
+          setIncomingCall(null);
+        }
+      }
+    };
+
+    callBus?.addEventListener('message', handleBusMessage);
+
+    return () => {
+      unsubCalls();
+      callBus?.removeEventListener('message', handleBusMessage);
+    };
+  }, [currentUser, incomingCall]);
+
   // Handlers for Active Calls
   const handleHoldToggle = (callId: string) => {
     setActiveCalls((prev) =>
@@ -230,6 +366,8 @@ export default function App() {
 
   const handleHangup = (callId: string) => {
     stopHoldMusic();
+    stopRingback();
+    stopIncomingRing();
     playTelephonyFx('hangup');
     const callToArchive = activeCalls.find((c) => c.id === callId);
     if (callToArchive) {
@@ -242,23 +380,54 @@ export default function App() {
       autoSaveCallToFirebase(completedCall);
     }
     setActiveCalls((prev) => prev.filter((c) => c.id !== callId));
+    updateActiveCall(callId, { status: 'ended' });
+    setTimeout(() => {
+      removeActiveCall(callId);
+    }, 1000);
   };
 
   const handleMakeCall = (number: string, name?: string) => {
+    if (!currentUser) return;
+    const cleanNum = number.trim();
+
+    // Check if the dialed number matches an employee / extension in the system
+    const targetUser = users.find(
+      (u) =>
+        u.extension.trim() === cleanNum ||
+        (u.username && u.username.trim() === cleanNum) ||
+        u.name.trim() === cleanNum
+    );
+
+    const isInternal = !!targetUser;
+    const callCode = generateCallCode();
+
     const newCall: Call = {
-      id: `call-${Date.now()}`,
-      callCode: generateCallCode(),
-      callerNumber: number,
-      callerName: name || `خطي خارجي (${number})`,
+      id: `call-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      callCode,
+      callerNumber: currentUser.extension,
+      callerName: currentUser.name,
+      callerExtension: currentUser.extension,
       extension: currentUser.extension,
+      calleeExtension: targetUser ? targetUser.extension : cleanNum,
+      calleeName: targetUser ? targetUser.name : (name || `خطي خارجي (${cleanNum})`),
       direction: 'outbound',
-      status: 'connected',
-      duration: 1,
+      status: isInternal ? 'ringing' : 'connected',
+      duration: isInternal ? 0 : 1,
       startTime: new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' }),
       channelId: `PJSIP/${currentUser.extension}-000000${Math.floor(Math.random() * 90 + 10)}`,
       isRecording: true,
+      isAppToApp: isInternal,
     };
-    setActiveCalls((prev) => [newCall, ...prev]);
+
+    if (isInternal) {
+      // Caller hears PBX ringback tone while waiting for the employee to answer
+      startRingback();
+    } else {
+      playTelephonyFx('connected');
+    }
+
+    setActiveCalls((prev) => [newCall, ...prev.filter((c) => c.id !== newCall.id)]);
+    publishActiveCall(newCall);
     autoSaveCallToFirebase(newCall);
   };
 
@@ -317,19 +486,22 @@ export default function App() {
 
   const handleAnswerIncomingCall = (call: Call) => {
     stopIncomingRing();
+    stopRingback();
     playTelephonyFx('connected');
     const answeredCall: Call = {
       ...call,
       status: 'connected',
       duration: 1,
     };
-    setActiveCalls((prev) => [answeredCall, ...prev]);
-    autoSaveCallToFirebase(answeredCall);
+    setActiveCalls((prev) => [answeredCall, ...prev.filter((c) => c.id !== call.id)]);
     setIncomingCall(null);
+    updateActiveCall(call.id, { status: 'connected', duration: 1 });
+    autoSaveCallToFirebase(answeredCall);
   };
 
   const handleRejectIncomingCall = (call: Call) => {
     stopIncomingRing();
+    stopRingback();
     playTelephonyFx('hangup');
     const missedCall: Call = {
       ...call,
@@ -338,6 +510,15 @@ export default function App() {
     setCallHistory((prev) => [missedCall, ...prev]);
     autoSaveCallToFirebase(missedCall);
     setIncomingCall(null);
+    updateActiveCall(call.id, { status: 'missed' });
+    setTimeout(() => {
+      removeActiveCall(call.id);
+    }, 1200);
+  };
+
+  const handleSwitchUser = (newUser: PBXUser) => {
+    setCurrentUser(newUser);
+    localStorage.setItem('etsalati_logged_in_user', JSON.stringify(newUser));
   };
 
   const handleSendToVoicemail = (call: Call) => {
@@ -433,6 +614,9 @@ export default function App() {
         activeCalls={activeCalls}
         incomingCall={incomingCall}
         callHistory={callHistory}
+        users={users}
+        onlineUsers={onlineUsers}
+        onSwitchUser={handleSwitchUser}
         onMakeCall={handleMakeCall}
         onHangupCall={handleHangup}
         onHoldToggle={handleHoldToggle}

@@ -34,7 +34,11 @@ export interface Call {
   direction: CallDirection;
   callerNumber: string;
   callerName: string;
-  extension: string;
+  extension: string; // Originating extension or primary extension
+  calleeExtension?: string; // Destination employee extension
+  calleeName?: string; // Destination employee name
+  callerExtension?: string; // Source employee extension
+  isAppToApp?: boolean; // True when direct web calling between employees in the app
   status: CallStatus;
   startTime: string;
   duration: number; // in seconds
