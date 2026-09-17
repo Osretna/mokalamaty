@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Header } from './components/Header';
-import { Navigation } from './components/Navigation';
+import { Navigation, ActiveTab } from './components/Navigation';
 import { SoftphoneModal } from './components/SoftphoneModal';
 import { ScreenPopModal } from './components/ScreenPopModal';
 import { TransferModal } from './components/TransferModal';
@@ -56,9 +56,25 @@ import {
 } from './lib/firebase';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<
-    'dashboard' | 'calls' | 'voicemail' | 'fax' | 'conferences' | 'crm' | 'users' | 'middleware'
-  >('dashboard');
+  const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
+    const validTabs: ActiveTab[] = [
+      'dashboard',
+      'calls',
+      'voicemail',
+      'fax',
+      'conferences',
+      'crm',
+      'users',
+      'middleware',
+    ];
+    if (typeof window !== 'undefined') {
+      const hash = window.location.hash.replace('#', '') as ActiveTab;
+      if (validTabs.includes(hash)) return hash;
+      const saved = localStorage.getItem('etsalati_active_tab') as ActiveTab;
+      if (saved && validTabs.includes(saved)) return saved;
+    }
+    return 'dashboard';
+  });
 
   // Application State
   const [activeCalls, setActiveCalls] = useState<Call[]>(() => {
@@ -110,7 +126,10 @@ export default function App() {
     }
     return INITIAL_USERS[0]; // Eng. Nesma Gamal (Admin) by default
   });
-  const [adminPreviewAgent, setAdminPreviewAgent] = useState<boolean>(false);
+
+  const [adminPreviewAgent, setAdminPreviewAgent] = useState<boolean>(() => {
+    return localStorage.getItem('etsalati_admin_preview_agent') === 'true';
+  });
   const [amiEvents, setAmiEvents] = useState<AMIEvent[]>(INITIAL_AMI_EVENTS);
   const [pbxStatus, setPbxStatus] = useState<PBXStatus>(INITIAL_PBX_STATUS);
 
@@ -118,6 +137,37 @@ export default function App() {
   const [isSoftphoneOpen, setIsSoftphoneOpen] = useState(false);
   const [incomingCall, setIncomingCall] = useState<Call | null>(null);
   const [transferCall, setTransferCall] = useState<Call | null>(null);
+
+  // Synchronize Refs to prevent effect re-creation race conditions
+  const currentUserRef = useRef<PBXUser | null>(currentUser);
+  useEffect(() => {
+    currentUserRef.current = currentUser;
+  }, [currentUser]);
+
+  const incomingCallRef = useRef<Call | null>(incomingCall);
+  useEffect(() => {
+    incomingCallRef.current = incomingCall;
+  }, [incomingCall]);
+
+  // Persist Navigation & User Session across refresh
+  useEffect(() => {
+    localStorage.setItem('etsalati_active_tab', activeTab);
+    if (typeof window !== 'undefined') {
+      window.location.hash = `#${activeTab}`;
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
+    localStorage.setItem('etsalati_admin_preview_agent', adminPreviewAgent ? 'true' : 'false');
+  }, [adminPreviewAgent]);
+
+  useEffect(() => {
+    if (currentUser) {
+      localStorage.setItem('etsalati_logged_in_user', JSON.stringify(currentUser));
+    } else {
+      localStorage.removeItem('etsalati_logged_in_user');
+    }
+  }, [currentUser]);
 
   // Save to LocalStorage
   useEffect(() => {
@@ -236,20 +286,33 @@ export default function App() {
     };
   }, [currentUser]);
 
-  // Real-time Active Calls Listener (Firebase Firestore + BroadcastChannel for same-device cross-tab)
+  // Real-time Active Calls Listener (Firebase Firestore + BroadcastChannel + LocalStorage for same-device cross-tab)
   useEffect(() => {
     if (!currentUser) return;
 
-    // 1. Subscribe to Firestore active_calls
-    const unsubCalls = subscribeActiveCalls((liveCalls) => {
+    // Process live calls list
+    const processLiveCalls = (liveCalls: Call[]) => {
+      const user = currentUserRef.current;
+      if (!user) return;
+      const myExt = String(user.extension).trim();
+      const myName = String(user.name).trim();
+      const myUser = String(user.username || '').trim();
+
       // Check if there is an incoming call ringing for this user:
-      const incoming = liveCalls.find(
-        (c) => c.calleeExtension === currentUser.extension && c.status === 'ringing'
-      );
+      const incoming = liveCalls.find((c) => {
+        if (c.status !== 'ringing') return false;
+        if (c.callerExtension && String(c.callerExtension).trim() === myExt) return false;
+        if (String(c.extension).trim() === myExt && c.direction === 'outbound') return false;
+
+        const calleeExt = String(c.calleeExtension || '').trim();
+        const calleeName = String(c.calleeName || '').trim();
+        return calleeExt === myExt || calleeName === myName || (myUser && calleeExt === myUser);
+      });
+
       if (incoming) {
         setIncomingCall(incoming);
         startIncomingRing();
-      } else if (incomingCall && !liveCalls.some((c) => c.id === incomingCall.id && c.status === 'ringing')) {
+      } else if (incomingCallRef.current && !liveCalls.some((c) => c.id === incomingCallRef.current?.id && c.status === 'ringing')) {
         stopIncomingRing();
         setIncomingCall(null);
       }
@@ -282,7 +345,7 @@ export default function App() {
         // If a remote call was accepted and involves this user as callee
         liveCalls.forEach((rc) => {
           if (
-            (rc.extension === currentUser.extension || rc.calleeExtension === currentUser.extension) &&
+            (String(rc.extension).trim() === myExt || String(rc.calleeExtension).trim() === myExt) &&
             rc.status === 'connected' &&
             !next.some((c) => c.id === rc.id)
           ) {
@@ -293,16 +356,28 @@ export default function App() {
 
         return changed ? next : prev;
       });
-    });
+    };
 
-    // 2. BroadcastChannel message handler for 0ms cross-tab instant communication
-    const handleBusMessage = (event: MessageEvent) => {
-      const data = event.data;
+    // 1. Subscribe to Firestore active_calls & localStorage storage events
+    const unsubCalls = subscribeActiveCalls(processLiveCalls);
+
+    // 2. BroadcastChannel & CustomEvent message handler for 0ms cross-tab instant communication
+    const handleBusData = (data: any) => {
       if (!data) return;
+      const user = currentUserRef.current;
+      if (!user) return;
+      const myExt = String(user.extension).trim();
+      const myName = String(user.name).trim();
+      const myUser = String(user.username || '').trim();
 
       if (data.type === 'CALL_INITIATED') {
         const call: Call = data.call;
-        if (call.calleeExtension === currentUser.extension && call.status === 'ringing') {
+        const calleeExt = String(call.calleeExtension || '').trim();
+        const calleeName = String(call.calleeName || '').trim();
+        const isTarget = calleeExt === myExt || calleeName === myName || (myUser && calleeExt === myUser);
+        const isNotSelf = String(call.callerExtension).trim() !== myExt;
+
+        if (isTarget && isNotSelf && call.status === 'ringing') {
           setIncomingCall(call);
           startIncomingRing();
         }
@@ -312,6 +387,7 @@ export default function App() {
           stopRingback();
           stopIncomingRing();
           playTelephonyFx('connected');
+          setIncomingCall(null);
         } else if (updates.status === 'ended' || updates.status === 'missed') {
           stopRingback();
           stopIncomingRing();
@@ -325,20 +401,30 @@ export default function App() {
         );
       } else if (data.type === 'CALL_REMOVED') {
         setActiveCalls((prev) => prev.filter((c) => c.id !== data.callId));
-        if (incomingCall && incomingCall.id === data.callId) {
+        if (incomingCallRef.current && incomingCallRef.current.id === data.callId) {
           stopIncomingRing();
           setIncomingCall(null);
         }
       }
     };
 
+    const handleBusMessage = (event: MessageEvent) => {
+      handleBusData(event.data);
+    };
+
+    const handleCustomBus = (e: Event) => {
+      handleBusData((e as CustomEvent).detail);
+    };
+
     callBus?.addEventListener('message', handleBusMessage);
+    window.addEventListener('etsalati_call_bus', handleCustomBus);
 
     return () => {
       unsubCalls();
       callBus?.removeEventListener('message', handleBusMessage);
+      window.removeEventListener('etsalati_call_bus', handleCustomBus);
     };
-  }, [currentUser, incomingCall]);
+  }, [currentUser]);
 
   // Handlers for Active Calls
   const handleHoldToggle = (callId: string) => {
@@ -362,6 +448,16 @@ export default function App() {
     setActiveCalls((prev) =>
       prev.map((c) => (c.id === callId ? { ...c, isRecording: !c.isRecording } : c))
     );
+  };
+
+  const handleSimulateRemoteAnswer = (callId: string) => {
+    stopRingback();
+    stopIncomingRing();
+    playTelephonyFx('connected');
+    setActiveCalls((prev) =>
+      prev.map((c) => (c.id === callId ? { ...c, status: 'connected', duration: 1 } : c))
+    );
+    updateActiveCall(callId, { status: 'connected', duration: 1 });
   };
 
   const handleHangup = (callId: string) => {
@@ -622,6 +718,7 @@ export default function App() {
         onHoldToggle={handleHoldToggle}
         onAnswerIncoming={() => incomingCall && handleAnswerIncomingCall(incomingCall)}
         onRejectIncoming={() => incomingCall && handleRejectIncomingCall(incomingCall)}
+        onSimulateRemoteAnswer={handleSimulateRemoteAnswer}
         onTriggerSimulatedCall={handleTriggerSimulatedIncomingCall}
         onLogout={handleLogout}
         onSwitchToAdmin={currentUser.role === 'admin' ? () => setAdminPreviewAgent(false) : undefined}
@@ -649,7 +746,8 @@ export default function App() {
       <Navigation
         activeTab={activeTab}
         onSelectTab={setActiveTab}
-        unreadVoicemails={unreadVoicemailCount}
+        unreadVoicemailsCount={unreadVoicemailCount}
+        unresolvedFaxesCount={faxes.filter((f) => f.status === 'received').length}
         activeCallsCount={activeCalls.length}
       />
 
@@ -761,10 +859,17 @@ export default function App() {
 
       <ScreenPopModal
         incomingCall={incomingCall}
-        crmContacts={crmContacts}
+        crmContact={
+          crmContacts.find(
+            (c) =>
+              incomingCall &&
+              (c.phone === incomingCall.callerNumber || c.extension === incomingCall.callerExtension)
+          ) || null
+        }
         onAnswer={handleAnswerIncomingCall}
         onReject={handleRejectIncomingCall}
-        onSendVoicemail={handleSendToVoicemail}
+        onSendToVoicemail={handleSendToVoicemail}
+        onAddCRMNote={handleAddCRMNote}
       />
 
       <TransferModal

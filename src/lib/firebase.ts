@@ -41,17 +41,29 @@ export const callBus = typeof window !== 'undefined' && 'BroadcastChannel' in wi
   : null;
 
 /**
- * Publish Live Call across all tabs and Firebase (Firestore + RTDB)
+ * Publish Live Call across all tabs, local storage, and Firebase (Firestore + RTDB)
  */
 export async function publishActiveCall(call: Call): Promise<void> {
-  // 1. Broadcast locally across browser tabs immediately (0ms)
+  // 1. Update local storage active calls map for cross-tab sync
+  try {
+    const raw = localStorage.getItem('etsalati_active_calls');
+    const existing: Call[] = raw ? JSON.parse(raw) : [];
+    const next = [call, ...existing.filter((c) => c.id !== call.id)];
+    localStorage.setItem('etsalati_active_calls', JSON.stringify(next));
+    localStorage.setItem('etsalati_live_call_event', JSON.stringify({ type: 'CALL_INITIATED', call, ts: Date.now() }));
+    window.dispatchEvent(new CustomEvent('etsalati_call_bus', { detail: { type: 'CALL_INITIATED', call } }));
+  } catch (e) {
+    console.debug('LocalStorage call publish error', e);
+  }
+
+  // 2. Broadcast locally across browser tabs immediately (0ms)
   try {
     callBus?.postMessage({ type: 'CALL_INITIATED', call });
   } catch (e) {
     console.debug('Broadcast error', e);
   }
 
-  // 2. Publish to Firestore active_calls collection
+  // 3. Publish to Firestore active_calls collection
   try {
     const callRef = doc(db, 'active_calls', call.id);
     await setDoc(callRef, {
@@ -62,7 +74,7 @@ export async function publishActiveCall(call: Call): Promise<void> {
     console.warn('Firestore active_calls write warning:', e);
   }
 
-  // 3. Mirror to Realtime Database
+  // 4. Mirror to Realtime Database
   try {
     const rtdbRef = ref(rtdb, `activeCalls/${call.id}`);
     await set(rtdbRef, {
@@ -78,12 +90,30 @@ export async function publishActiveCall(call: Call): Promise<void> {
  * Update active call status (e.g. ringing -> connected -> ended)
  */
 export async function updateActiveCall(callId: string, updates: Partial<Call>): Promise<void> {
+  // 1. Update LocalStorage
+  try {
+    const raw = localStorage.getItem('etsalati_active_calls');
+    if (raw) {
+      const existing: Call[] = JSON.parse(raw);
+      const next = existing
+        .map((c) => (c.id === callId ? { ...c, ...updates } : c))
+        .filter((c) => c.status !== 'ended' && c.status !== 'missed');
+      localStorage.setItem('etsalati_active_calls', JSON.stringify(next));
+    }
+    localStorage.setItem('etsalati_live_call_event', JSON.stringify({ type: 'CALL_UPDATED', callId, updates, ts: Date.now() }));
+    window.dispatchEvent(new CustomEvent('etsalati_call_bus', { detail: { type: 'CALL_UPDATED', callId, updates } }));
+  } catch (e) {
+    console.debug('LocalStorage call update error', e);
+  }
+
+  // 2. BroadcastChannel
   try {
     callBus?.postMessage({ type: 'CALL_UPDATED', callId, updates });
   } catch (e) {
     console.debug('Broadcast error', e);
   }
 
+  // 3. Firestore
   try {
     const callRef = doc(db, 'active_calls', callId);
     await setDoc(callRef, {
@@ -94,6 +124,7 @@ export async function updateActiveCall(callId: string, updates: Partial<Call>): 
     console.warn('Firestore active_calls update warning:', e);
   }
 
+  // 4. Realtime Database
   try {
     const rtdbRef = ref(rtdb, `activeCalls/${callId}`);
     await update(rtdbRef, {
@@ -109,12 +140,28 @@ export async function updateActiveCall(callId: string, updates: Partial<Call>): 
  * Remove active call once finished
  */
 export async function removeActiveCall(callId: string): Promise<void> {
+  // 1. LocalStorage
+  try {
+    const raw = localStorage.getItem('etsalati_active_calls');
+    if (raw) {
+      const existing: Call[] = JSON.parse(raw);
+      const next = existing.filter((c) => c.id !== callId);
+      localStorage.setItem('etsalati_active_calls', JSON.stringify(next));
+    }
+    localStorage.setItem('etsalati_live_call_event', JSON.stringify({ type: 'CALL_REMOVED', callId, ts: Date.now() }));
+    window.dispatchEvent(new CustomEvent('etsalati_call_bus', { detail: { type: 'CALL_REMOVED', callId } }));
+  } catch (e) {
+    console.debug('LocalStorage remove call error', e);
+  }
+
+  // 2. BroadcastChannel
   try {
     callBus?.postMessage({ type: 'CALL_REMOVED', callId });
   } catch (e) {
     console.debug('Broadcast error', e);
   }
 
+  // 3. Firestore
   try {
     const callRef = doc(db, 'active_calls', callId);
     await deleteDoc(callRef);
@@ -122,6 +169,7 @@ export async function removeActiveCall(callId: string): Promise<void> {
     // ignore
   }
 
+  // 4. Realtime Database
   try {
     const rtdbRef = ref(rtdb, `activeCalls/${callId}`);
     await remove(rtdbRef);
@@ -131,7 +179,7 @@ export async function removeActiveCall(callId: string): Promise<void> {
 }
 
 /**
- * Subscribe to active calls in real time (Firestore + Local Broadcast)
+ * Subscribe to active calls in real time (Firestore + Local Broadcast + Storage event)
  */
 export function subscribeActiveCalls(
   onUpdate: (calls: Call[]) => void
@@ -143,13 +191,32 @@ export function subscribeActiveCalls(
     snapshot.forEach((d) => {
       list.push(d.data() as Call);
     });
-    onUpdate(list);
+    if (list.length > 0) {
+      onUpdate(list);
+    }
   }, (err) => {
     console.warn('active_calls firestore snapshot note:', err.message);
   });
 
+  // Also listen to local storage storage events (for cross-tab reliability)
+  const handleStorage = (e: StorageEvent) => {
+    if (e.key === 'etsalati_active_calls' && e.newValue) {
+      try {
+        const calls = JSON.parse(e.newValue);
+        if (Array.isArray(calls)) {
+          onUpdate(calls);
+        }
+      } catch {
+        // ignore
+      }
+    }
+  };
+
+  window.addEventListener('storage', handleStorage);
+
   return () => {
     unsubFirestore();
+    window.removeEventListener('storage', handleStorage);
   };
 }
 
@@ -166,14 +233,25 @@ export function sendUserPresenceHeartbeat(user: PBXUser) {
     status: 'online',
   };
 
-  // 1. Broadcast locally
+  // 1. Update localStorage presence map (reliable across same-browser tabs)
+  try {
+    const raw = localStorage.getItem('etsalati_presence_map');
+    const map: Record<string, typeof presenceData> = raw ? JSON.parse(raw) : {};
+    map[user.extension] = presenceData;
+    localStorage.setItem('etsalati_presence_map', JSON.stringify(map));
+    window.dispatchEvent(new CustomEvent('etsalati_presence_update', { detail: map }));
+  } catch {
+    // ignore
+  }
+
+  // 2. Broadcast locally
   try {
     callBus?.postMessage({ type: 'PRESENCE_HEARTBEAT', presence: presenceData });
   } catch (e) {
     // ignore
   }
 
-  // 2. Mirror to Realtime Database / Firestore
+  // 3. Mirror to Realtime Database / Firestore
   try {
     const rtdbRef = ref(rtdb, `presence/${user.extension}`);
     set(rtdbRef, presenceData).catch(() => {});
@@ -190,24 +268,76 @@ export function sendUserPresenceHeartbeat(user: PBXUser) {
 }
 
 /**
- * Subscribe to online presence
+ * Subscribe to online presence across Firestore, LocalStorage, and Broadcast
  */
 export function subscribeOnlinePresence(
   onUpdate: (onlineMap: Record<string, { lastSeen: number; name: string; extension: string }>) => void
 ): () => void {
+  // Read existing from LocalStorage initially
+  try {
+    const raw = localStorage.getItem('etsalati_presence_map');
+    if (raw) {
+      onUpdate(JSON.parse(raw));
+    }
+  } catch {
+    // ignore
+  }
+
   const presenceCol = collection(db, 'presence');
-  const unsub = onSnapshot(presenceCol, (snapshot) => {
+  const unsubFirestore = onSnapshot(presenceCol, (snapshot) => {
     const map: Record<string, { lastSeen: number; name: string; extension: string }> = {};
     snapshot.forEach((d) => {
       const data = d.data() as { lastSeen: number; name: string; extension: string };
       map[data.extension] = data;
     });
+    // Merge with localStorage
+    try {
+      const raw = localStorage.getItem('etsalati_presence_map');
+      if (raw) {
+        const local = JSON.parse(raw);
+        Object.assign(local, map);
+        onUpdate(local);
+        return;
+      }
+    } catch {
+      // ignore
+    }
     onUpdate(map);
   }, () => {
-    // ignore
+    // fallback to local map
+    try {
+      const raw = localStorage.getItem('etsalati_presence_map');
+      if (raw) onUpdate(JSON.parse(raw));
+    } catch {
+      // ignore
+    }
   });
 
-  return () => unsub();
+  const handleStorage = (e: StorageEvent) => {
+    if (e.key === 'etsalati_presence_map' && e.newValue) {
+      try {
+        onUpdate(JSON.parse(e.newValue));
+      } catch {
+        // ignore
+      }
+    }
+  };
+
+  const handleCustom = (e: Event) => {
+    const custom = e as CustomEvent;
+    if (custom.detail) {
+      onUpdate(custom.detail);
+    }
+  };
+
+  window.addEventListener('storage', handleStorage);
+  window.addEventListener('etsalati_presence_update', handleCustom);
+
+  return () => {
+    unsubFirestore();
+    window.removeEventListener('storage', handleStorage);
+    window.removeEventListener('etsalati_presence_update', handleCustom);
+  };
 }
 
 /**

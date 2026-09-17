@@ -7,45 +7,28 @@ import {
   PhoneOutgoing,
   Mic,
   MicOff,
-  Volume2,
-  VolumeX,
   Pause,
   Play,
   RotateCcw,
   Clock,
   User,
   ShieldCheck,
-  Check,
-  Copy,
   Download,
-  Flame,
-  Radio,
-  Server,
   LogOut,
-  Smartphone,
-  Info,
-  CheckCircle2,
-  FileText,
-  Settings,
-  Headphones,
-  Wrench,
-  Sparkles,
-  Activity,
-  Wifi,
-  AlertTriangle,
   Users,
+  CheckCircle2,
+  Headphones,
+  Sparkles,
+  Search,
+  Radio,
   UserCheck
 } from 'lucide-react';
 import { PBXUser, Call } from '../../types';
 import {
   playDTMF,
-  startDialTone,
-  stopDialTone,
-  startLiveMicTest,
   playTelephonyFx
 } from '../../utils/audioTones';
 import { downloadCallAudioBlob } from '../../lib/firebase';
-import { ThreeCXDiagnosticModal } from '../ThreeCXDiagnosticModal';
 
 interface AgentCallViewProps {
   currentUser: PBXUser;
@@ -60,7 +43,8 @@ interface AgentCallViewProps {
   onHoldToggle: (callId: string) => void;
   onAnswerIncoming: () => void;
   onRejectIncoming: () => void;
-  onTriggerSimulatedCall: () => void;
+  onSimulateRemoteAnswer?: (callId: string) => void;
+  onTriggerSimulatedCall?: () => void;
   onLogout: () => void;
   onSwitchToAdmin?: () => void;
 }
@@ -78,89 +62,28 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
   onHoldToggle,
   onAnswerIncoming,
   onRejectIncoming,
+  onSimulateRemoteAnswer,
   onTriggerSimulatedCall,
   onLogout,
   onSwitchToAdmin,
 }) => {
   const [dialNumber, setDialNumber] = useState('');
   const [isMuted, setIsMuted] = useState(false);
-  const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [lastDialed, setLastDialed] = useState<string>('');
   const [callNotes, setCallNotes] = useState('');
-  const [is3CXFixModalOpen, setIs3CXFixModalOpen] = useState(false);
-  const [isOffHook, setIsOffHook] = useState(false);
-  const [isMicTesting, setIsMicTesting] = useState(false);
-  const [micLevel, setMicLevel] = useState(0);
-  const [micStopFn, setMicStopFn] = useState<(() => void) | null>(null);
+  const [searchDirectory, setSearchDirectory] = useState('');
+  const [isSwitchUserOpen, setIsSwitchUserOpen] = useState(false);
 
   // Find active call for this agent's extension (either as caller or as callee)
   const currentCall = activeCalls.find(
     (c) =>
-      (c.extension === currentUser.extension || c.calleeExtension === currentUser.extension) &&
+      (String(c.extension).trim() === String(currentUser.extension).trim() ||
+       String(c.calleeExtension).trim() === String(currentUser.extension).trim()) &&
       c.status !== 'ended' &&
       c.status !== 'missed'
   );
 
-  // Stop dial tone when in call or call state changes
-  useEffect(() => {
-    if (currentCall) {
-      stopDialTone();
-      setIsOffHook(true);
-    } else if (!isOffHook) {
-      stopDialTone();
-    }
-  }, [currentCall]);
-
-  // Clean up on unmount
-  useEffect(() => {
-    return () => {
-      stopDialTone();
-      if (micStopFn) {
-        micStopFn();
-      }
-    };
-  }, [micStopFn]);
-
-  // Toggle Hook Switch (رفع / إنزال السماعة)
-  const handleToggleHook = () => {
-    if (currentCall) {
-      onHangupCall(currentCall.id);
-      setIsOffHook(false);
-      stopDialTone();
-      playTelephonyFx('hangup');
-    } else if (isOffHook) {
-      // Put On Hook
-      setIsOffHook(false);
-      stopDialTone();
-      playTelephonyFx('hangup');
-    } else {
-      // Take Off Hook -> Start PBX Dial Tone
-      setIsOffHook(true);
-      startDialTone();
-    }
-  };
-
-  // Toggle Live Mic Echo Test
-  const handleToggleMicTest = async () => {
-    if (isMicTesting && micStopFn) {
-      micStopFn();
-      setMicStopFn(null);
-      setIsMicTesting(false);
-      setMicLevel(0);
-    } else {
-      try {
-        const { stop } = await startLiveMicTest((level) => {
-          setMicLevel(level);
-        }, true);
-        setMicStopFn(() => stop);
-        setIsMicTesting(true);
-      } catch {
-        alert('يرجى السماح بالوصول إلى الميكروفون من إعدادات المتصفح');
-      }
-    }
-  };
-
-  // Keypad buttons
+  // DTMF keypad buttons
   const keypad = [
     { digit: '1', sub: '' },
     { digit: '2', sub: 'ABC' },
@@ -177,17 +100,14 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
   ];
 
   const handleKeyPress = (digit: string) => {
-    stopDialTone();
     playDTMF(digit);
     setDialNumber((prev) => prev + digit);
   };
 
   const handleCall = () => {
     if (!dialNumber.trim()) return;
-    stopDialTone();
-    setIsOffHook(true);
     const cleanNum = dialNumber.trim();
-    const target = users?.find(
+    const target = users.find(
       (u) =>
         u.extension.trim() === cleanNum ||
         (u.username && u.username.trim() === cleanNum) ||
@@ -200,16 +120,8 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
 
   const handleRedial = () => {
     if (lastDialed) {
-      stopDialTone();
-      setIsOffHook(true);
       onMakeCall(lastDialed);
     }
-  };
-
-  const handleCopy = (key: string, text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedKey(key);
-    setTimeout(() => setCopiedKey(null), 2000);
   };
 
   const formatSeconds = (sec: number) => {
@@ -218,90 +130,68 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
     return `${mins.toString().padStart(2, '0')}:${remaining.toString().padStart(2, '0')}`;
   };
 
-  // 3CX Phone Credentials
-  const pbxHost = currentUser.sipServer || '192.168.1.100';
-  const threeCXConfig = {
-    accountName: `mokalamaty_${currentUser.extension}`,
-    callerId: `${currentUser.name} (${currentUser.extension})`,
-    extension: currentUser.extension,
-    id: currentUser.username || currentUser.extension,
-    password: currentUser.password || currentUser.secret || '123456',
-    serverIp: pbxHost,
-    outboundProxy: `${pbxHost}:5060`,
-  };
-
-  // Generate .3cxconfig XML download
-  const handleDownload3CXConfig = () => {
-    const xmlContent = `<?xml version="1.0" encoding="utf-8"?>
-<AccountConfiguration>
-  <AccountName>${threeCXConfig.accountName}</AccountName>
-  <CallerID>${threeCXConfig.callerId}</CallerID>
-  <Extension>${threeCXConfig.extension}</Extension>
-  <ID>${threeCXConfig.id}</ID>
-  <Password>${threeCXConfig.password}</Password>
-  <ServerIP>${threeCXConfig.serverIp}</ServerIP>
-  <OutboundProxy>${threeCXConfig.outboundProxy}</OutboundProxy>
-  <Protocol>UDP</Protocol>
-  <Port>5060</Port>
-  <Codec>G711u,G711a,G729</Codec>
-</AccountConfiguration>`;
-
-    const blob = new Blob([xmlContent], { type: 'application/xml' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `3cx_config_${currentUser.extension}.3cxconfig`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
   // Filter call history for this user
-  const myHistory = callHistory.filter((c) => c.extension === currentUser.extension);
+  const myHistory = callHistory.filter(
+    (c) =>
+      String(c.extension).trim() === String(currentUser.extension).trim() ||
+      String(c.calleeExtension).trim() === String(currentUser.extension).trim()
+  );
+
+  // Filter colleagues in directory
+  const colleagues = users.filter((u) => {
+    const query = searchDirectory.trim().toLowerCase();
+    if (!query) return true;
+    return (
+      u.name.toLowerCase().includes(query) ||
+      u.extension.toLowerCase().includes(query) ||
+      (u.username && u.username.toLowerCase().includes(query))
+    );
+  });
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans flex flex-col">
-      {/* Top Agent Bar */}
-      <header className="bg-slate-900/95 border-b border-slate-800 px-4 py-3 sticky top-0 z-30 shadow-lg backdrop-blur-md">
+    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans flex flex-col selection:bg-cyan-500 selection:text-slate-950">
+      {/* Top Header - Focused on the Agent's Extension and Status */}
+      <header className="bg-slate-900/90 border-b border-slate-800 px-4 sm:px-6 py-3 sticky top-0 z-30 shadow-lg backdrop-blur-md">
         <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
-          {/* Brand & User Info */}
+          {/* Brand & User identity */}
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-cyan-600 to-cyan-500 flex items-center justify-center text-white shadow-md shadow-cyan-600/30 font-bold">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-600 to-blue-600 flex items-center justify-center text-white shadow-md shadow-cyan-600/30 font-bold">
               <PhoneCall className="w-5 h-5" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="text-sm font-bold text-white leading-tight">
-                  واجهة موظف الاتصال • {currentUser.name}
+                <h1 className="text-base font-extrabold text-white leading-tight">
+                  اتصالاتي • صفحة المكالمات
                 </h1>
-                <span className="text-[11px] font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 px-2 py-0.5 rounded-full">
+                <span className="text-xs font-mono font-bold bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 px-2.5 py-0.5 rounded-full">
                   تحويلة: #{currentUser.extension}
                 </span>
-                <span className="flex items-center gap-1 text-[10px] bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded-full">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  <span>3CX جاهز للاتصال</span>
+                <span className="flex items-center gap-1.5 text-[11px] bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 px-2.5 py-0.5 rounded-full font-medium">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <span>متصل - جاهز للمكالمات</span>
                 </span>
               </div>
-              <p className="text-[11px] text-slate-400">
-                اسم المستخدم للدخول: <span className="font-mono text-cyan-300 font-semibold">{currentUser.username || currentUser.extension}</span>
+              <p className="text-xs text-slate-400 mt-0.5">
+                الموظف: <span className="text-slate-200 font-semibold">{currentUser.name}</span>
               </p>
             </div>
           </div>
 
-          {/* Status Indicators & Actions */}
+          {/* User Controls: Switch User & Logout */}
           <div className="flex items-center gap-2">
-            {/* Quick Inbound Test Call Simulation */}
-            <button
-              onClick={onTriggerSimulatedCall}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-xs font-semibold transition-all active:scale-95 cursor-pointer"
-              title="محاكاة مكالمة واردة لاختبار شاشة المتصل والتوقيت"
-            >
-              <PhoneIncoming className="w-3.5 h-3.5 text-amber-400" />
-              <span>محاكاة اتصال وارد</span>
-            </button>
+            {/* Quick Switch User for easy multi-account testing */}
+            {onSwitchUser && (
+              <button
+                onClick={() => setIsSwitchUserOpen(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-750 text-slate-300 hover:text-white border border-slate-700 text-xs font-semibold transition-all cursor-pointer"
+                title="التبديل لحساب موظف آخر لتجربة الاتصال المتبادل"
+              >
+                <UserCheck className="w-3.5 h-3.5 text-cyan-400" />
+                <span>تبديل الموظف ({currentUser.extension})</span>
+              </button>
+            )}
 
-            {/* If Admin is previewing, button to return to Admin Dashboard */}
+            {/* If Admin is testing the Agent view */}
             {currentUser.role === 'admin' && onSwitchToAdmin && (
               <button
                 onClick={onSwitchToAdmin}
@@ -315,7 +205,7 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
             {/* Logout */}
             <button
               onClick={onLogout}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-red-950/50 text-slate-300 hover:text-red-300 border border-slate-700 hover:border-red-500/40 text-xs font-semibold transition-all cursor-pointer"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-red-950/60 text-slate-300 hover:text-red-300 border border-slate-700 hover:border-red-500/40 text-xs font-semibold transition-all cursor-pointer"
             >
               <LogOut className="w-3.5 h-3.5" />
               <span>تسجيل الخروج</span>
@@ -324,183 +214,75 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
         </div>
       </header>
 
-      {/* Main Content Area */}
-      <main className="max-w-7xl mx-auto p-4 sm:p-6 flex-1 w-full space-y-6">
+      {/* Main Calling Workspace */}
+      <main className="max-w-7xl mx-auto p-4 sm:p-6 flex-1 w-full space-y-5">
         
-        {/* In-App Direct Calling Feature Banner */}
-        <div className="bg-gradient-to-r from-emerald-500/15 via-slate-900 to-cyan-500/15 border-2 border-emerald-500/40 rounded-3xl p-4 sm:p-5 flex flex-col md:flex-row items-center justify-between gap-4 shadow-xl">
-          <div className="flex items-center gap-3 text-right">
-            <div className="w-12 h-12 rounded-2xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 flex items-center justify-center shrink-0">
-              <Sparkles className="w-6 h-6 animate-pulse" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-bold text-emerald-300 bg-emerald-500/20 border border-emerald-500/30 px-2.5 py-0.5 rounded-full flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  الاتصال المباشر من التطبيق للتطبيق مفعّل بنجاح
-                </span>
-                <span className="text-xs font-mono font-bold text-cyan-300 bg-cyan-500/20 border border-cyan-500/30 px-2 py-0.5 rounded-full">
-                  بدون برامج خارجية (No 3CX Needed)
-                </span>
-              </div>
-              <h3 className="text-sm font-bold text-white mt-1">
-                الاتصال الفعلي بالموظفين المتواجدين داخل التطبيق يعمل الآن مباشرة!
-              </h3>
-              <p className="text-xs text-slate-300 mt-0.5">
-                عند إدخال رقم أي موظف أو الضغط على "اتصال" من دليل الموظفين، سيصل الاتصال والرنين فوراً لشاشته داخل التطبيق ما دام مسجلاً ومفتوحاً لديه.
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              onClick={() => setIs3CXFixModalOpen(true)}
-              className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-750 text-slate-300 hover:text-white border border-slate-700 font-bold text-xs flex items-center gap-2 transition-all cursor-pointer"
-              title="إعدادات 3CXPhone الاختيارية لمن يرغب بربط هاتف خارجي"
-            >
-              <Wrench className="w-4 h-4 text-amber-400" />
-              <span>إعدادات 3CXPhone (اختياري)</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Incoming Call Screen-Pop Alert Banner (If Any) */}
+        {/* Unmissable High-Visibility Incoming Call Alert Banner */}
         {incomingCall && (
-          <div className="bg-gradient-to-r from-emerald-950/90 via-slate-900 to-cyan-950/90 border-2 border-emerald-500 rounded-2xl p-5 shadow-2xl animate-pulse">
-            <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+          <div className="bg-gradient-to-r from-emerald-950 via-slate-900 to-teal-950 border-2 border-emerald-500 rounded-3xl p-5 sm:p-6 shadow-2xl shadow-emerald-500/30 animate-pulse">
+            <div className="flex flex-col md:flex-row items-center justify-between gap-5">
               <div className="flex items-center gap-4 text-right">
-                <div className="w-14 h-14 rounded-2xl bg-emerald-500 text-slate-950 flex items-center justify-center animate-bounce shadow-lg shadow-emerald-500/30">
-                  <PhoneIncoming className="w-7 h-7" />
+                <div className="w-16 h-16 rounded-2xl bg-emerald-500 text-slate-950 flex items-center justify-center animate-bounce shadow-xl shadow-emerald-500/40 shrink-0">
+                  <PhoneIncoming className="w-8 h-8" />
                 </div>
                 <div>
                   <div className="flex items-center gap-2">
-                    <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-xs font-bold border border-emerald-500/40">
-                      مكالمة واردة الآن (Incoming SIP Call)
+                    <span className="px-3 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-xs font-bold border border-emerald-500/40 flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                      مكالمة واردة الآن ترن على خطك!
                     </span>
-                    <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-mono text-xs font-bold border border-amber-500/30">
+                    <span className="px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-mono text-xs font-bold border border-amber-500/30">
                       كود: {incomingCall.callCode}
                     </span>
                   </div>
-                  <h3 className="text-xl font-black text-white mt-1">{incomingCall.callerName}</h3>
-                  <p className="text-sm font-mono text-emerald-400 font-bold mt-0.5">
-                    الرقم: {incomingCall.callerNumber} • إلى تحويلة {currentUser.extension}
+                  <h3 className="text-2xl font-black text-white mt-1.5">
+                    {incomingCall.callerName}
+                  </h3>
+                  <p className="text-sm font-mono text-emerald-300 font-bold mt-0.5">
+                    التحويلة: #{incomingCall.callerExtension || incomingCall.callerNumber} • إلى تحويلتك #{currentUser.extension}
                   </p>
                 </div>
               </div>
 
-              {/* Action Buttons */}
+              {/* Action Buttons: Answer & Decline */}
               <div className="flex items-center gap-3 w-full md:w-auto">
                 <button
                   onClick={onRejectIncoming}
-                  className="flex-1 md:flex-none px-6 py-3 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 transition-all active:scale-95 cursor-pointer"
+                  className="flex-1 md:flex-none px-6 py-3.5 rounded-2xl bg-red-600 hover:bg-red-500 text-white font-black text-sm flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 transition-all active:scale-95 cursor-pointer"
                 >
-                  <PhoneOff className="w-4 h-4" />
+                  <PhoneOff className="w-5 h-5" />
                   <span>رفض المكالمة</span>
                 </button>
                 <button
                   onClick={onAnswerIncoming}
-                  className="flex-1 md:flex-none px-8 py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/30 transition-all active:scale-95 cursor-pointer"
+                  className="flex-1 md:flex-none px-8 py-3.5 rounded-2xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-sm flex items-center justify-center gap-2 shadow-xl shadow-emerald-500/40 transition-all active:scale-95 cursor-pointer"
                 >
-                  <PhoneCall className="w-4 h-4" />
-                  <span>الرد على المكالمة</span>
+                  <PhoneCall className="w-5 h-5 animate-pulse" />
+                  <span>الرد على المكالمة الآن</span>
                 </button>
               </div>
             </div>
           </div>
         )}
 
-        {/* 2-Column Grid: [Dialpad & Live Call Console] & [Caller Info + 3CX Setup] */}
+        {/* 2-Column Responsive Layout:
+            - Left: Keypad & Quick Contacts
+            - Right: Active Call / Caller Info & Timing
+        */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          {/* Left Column (5 cols): Dial Pad & Control Buttons (قائمة الأزرار) */}
-          <div className="lg:col-span-5 space-y-4">
+          
+          {/* Left Column (5 Cols): لوحة الأزرار والاتصال ودليل التحويلات */}
+          <div className="lg:col-span-5 space-y-5">
+            {/* Keypad Card */}
             <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-5 sm:p-6 shadow-xl">
-              {/* Header */}
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-sm font-bold text-white flex items-center gap-2">
                   <Phone className="w-4 h-4 text-cyan-400" />
-                  <span>لوحة الأزرار والاتصال (Dial Pad)</span>
+                  <span>لوحة الأزرار والطلب (Dial Pad)</span>
                 </h2>
-                <span className="text-[11px] text-slate-400 font-mono">
-                  SIP / {currentUser.protocol}
+                <span className="text-xs text-slate-400 font-mono">
+                  خطك: #{currentUser.extension}
                 </span>
-              </div>
-
-              {/* Line Hook Status & Operator Switch */}
-              <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-3 mb-4 flex items-center justify-between gap-3 shadow-inner">
-                <div className="flex items-center gap-2.5">
-                  <div className={`w-3.5 h-3.5 rounded-full ${
-                    currentCall
-                      ? 'bg-red-500 animate-ping'
-                      : isOffHook
-                      ? 'bg-amber-400 animate-pulse'
-                      : 'bg-emerald-400 shadow-sm shadow-emerald-400/50'
-                  }`} />
-                  <div>
-                    <div className="text-[10px] text-slate-400 font-semibold">حالة الخط (Line Hook Status):</div>
-                    <div className="text-xs font-mono font-black flex items-center gap-1.5 mt-0.5">
-                      {currentCall ? (
-                        <span className="text-red-400">🔴 In Call (جاري المكالمة)</span>
-                      ) : isOffHook ? (
-                        <span className="text-amber-300">🟡 Off Hook (سماعة مرفوعة - حرارة)</span>
-                      ) : (
-                        <span className="text-emerald-400">🟢 On Hook (جاهز ومغلق)</span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Hook Switch Toggle Button */}
-                <button
-                  onClick={handleToggleHook}
-                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md active:scale-95 ${
-                    currentCall || isOffHook
-                      ? 'bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/40 shadow-red-500/10'
-                      : 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 shadow-emerald-500/10'
-                  }`}
-                  title={isOffHook ? 'إنزال السماعة (Put On Hook)' : 'رفع السماعة وسماع نغمة البدالة (Take Off Hook)'}
-                >
-                  <Phone className="w-3.5 h-3.5" />
-                  <span>{isOffHook || currentCall ? 'إنزال السماعة (On Hook)' : 'رفع السماعة (Off Hook)'}</span>
-                </button>
-              </div>
-
-              {/* Live Mic Echo Test & Level Meter */}
-              <div className="bg-slate-950/60 border border-slate-800/80 rounded-2xl p-3 mb-4 flex flex-col gap-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Activity className="w-3.5 h-3.5 text-cyan-400" />
-                    <span className="text-xs font-bold text-slate-300">اختبار الميكروفون الحقيقي (Echo Test)</span>
-                  </div>
-                  <button
-                    onClick={handleToggleMicTest}
-                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1 transition-all cursor-pointer ${
-                      isMicTesting
-                        ? 'bg-emerald-500 text-slate-950 shadow-md shadow-emerald-500/30'
-                        : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
-                    }`}
-                  >
-                    <Mic className="w-3 h-3" />
-                    <span>{isMicTesting ? 'إيقاف الاختبار' : 'اختبار الصوت الحي'}</span>
-                  </button>
-                </div>
-
-                {isMicTesting && (
-                  <div className="space-y-1.5 pt-1 animate-in fade-in">
-                    <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono">
-                      <span>مستوى التقاط الصوت:</span>
-                      <span className="text-emerald-400 font-bold">{micLevel}%</span>
-                    </div>
-                    <div className="h-2 w-full bg-slate-800 rounded-full overflow-hidden flex">
-                      <div
-                        className="h-full transition-all duration-75 rounded-full bg-gradient-to-r from-emerald-500 via-cyan-400 to-amber-400"
-                        style={{ width: `${Math.max(5, micLevel)}%` }}
-                      />
-                    </div>
-                    <p className="text-[10px] text-emerald-300 font-medium">
-                      ✓ الميكروفون متصل ويعمل! تحدث وستسمع صوتك مباشرة لاختبار الجودة.
-                    </p>
-                  </div>
-                )}
               </div>
 
               {/* Dial Input Field */}
@@ -509,58 +291,18 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
                   type="text"
                   value={dialNumber}
                   onChange={(e) => setDialNumber(e.target.value)}
-                  placeholder="أدخل الرقم المطلوب أو استخدم الأزرار..."
-                  className="w-full bg-slate-800/90 border border-slate-700 rounded-2xl px-4 py-3.5 text-center text-lg font-mono font-bold text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/30 transition-all tracking-wider"
+                  placeholder="أدخل التحويلة أو الرقم المطلوب..."
+                  className="w-full bg-slate-800/90 border border-slate-700 rounded-2xl px-4 py-3.5 text-center text-xl font-mono font-bold text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/30 transition-all tracking-wider"
                 />
                 {dialNumber && (
                   <button
                     onClick={() => setDialNumber((prev) => prev.slice(0, -1))}
-                    className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white p-1 text-xs font-bold cursor-pointer"
+                    className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white px-2 py-1 text-xs font-bold cursor-pointer"
                   >
                     مسح
                   </button>
                 )}
               </div>
-
-              {/* Matched In-App Employee Indicator */}
-              {(() => {
-                const clean = dialNumber.trim();
-                if (!clean) return null;
-                const match = users?.find(
-                  (u) =>
-                    u.extension.trim() === clean ||
-                    (u.username && u.username.trim() === clean) ||
-                    u.name.trim() === clean
-                );
-                if (!match) return null;
-                const isOnline = onlineUsers?.[match.extension] && (Date.now() - onlineUsers[match.extension].lastSeen < 35000);
-                return (
-                  <div className="mb-4 p-2.5 rounded-xl bg-cyan-950/60 border border-cyan-500/30 flex items-center justify-between gap-2 text-xs">
-                    <div className="flex items-center gap-2">
-                      <div className="w-7 h-7 rounded-full bg-cyan-500/20 text-cyan-300 font-bold flex items-center justify-center text-xs">
-                        {match.name.charAt(0)}
-                      </div>
-                      <div className="text-right">
-                        <div className="font-bold text-white text-[11px]">{match.name}</div>
-                        <div className="text-[10px] text-cyan-300 font-mono">تحويلة #{match.extension} (اتصال داخل التطبيق)</div>
-                      </div>
-                    </div>
-                    <div>
-                      {isOnline ? (
-                        <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-bold border border-emerald-500/40 flex items-center gap-1">
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                          متواجد الآن بالتطبيق
-                        </span>
-                      ) : (
-                        <span className="px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 text-[10px] border border-slate-700 flex items-center gap-1">
-                          <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
-                          غير متواجد حالياً
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                );
-              })()}
 
               {/* Keypad Grid (قائمة الأزرار) */}
               <div className="grid grid-cols-3 gap-2.5 mb-4">
@@ -570,11 +312,11 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
                     onClick={() => handleKeyPress(k.digit)}
                     className="py-3 sm:py-3.5 rounded-2xl bg-slate-800/80 hover:bg-slate-750 active:bg-cyan-600/30 border border-slate-700/60 hover:border-cyan-500/50 text-white font-bold transition-all active:scale-95 flex flex-col items-center justify-center cursor-pointer group"
                   >
-                    <span className="text-lg font-mono leading-none group-hover:text-cyan-300">
+                    <span className="text-xl font-mono leading-none group-hover:text-cyan-300">
                       {k.digit}
                     </span>
                     {k.sub && (
-                      <span className="text-[9px] text-slate-500 font-normal tracking-widest mt-0.5">
+                      <span className="text-[10px] text-slate-500 font-normal tracking-widest mt-0.5">
                         {k.sub}
                       </span>
                     )}
@@ -582,22 +324,22 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
                 ))}
               </div>
 
-              {/* Main Call Action Buttons */}
-              <div className="grid grid-cols-2 gap-3 pt-2">
+              {/* Call / Redial Actions */}
+              <div className="grid grid-cols-2 gap-3 pt-1">
                 {currentCall ? (
                   <button
                     onClick={() => onHangupCall(currentCall.id)}
-                    className="col-span-2 py-3.5 rounded-2xl bg-red-600 hover:bg-red-500 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 transition-all active:scale-95 cursor-pointer"
+                    className="col-span-2 py-3.5 rounded-2xl bg-red-600 hover:bg-red-500 text-white font-black text-sm flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 transition-all active:scale-95 cursor-pointer"
                   >
                     <PhoneOff className="w-5 h-5" />
-                    <span>إنهاء المكالمة الحالية</span>
+                    <span>إنهاء المكالمة</span>
                   </button>
                 ) : (
                   <>
                     <button
                       onClick={handleCall}
                       disabled={!dialNumber.trim()}
-                      className="py-3.5 rounded-2xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:hover:bg-emerald-600 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/30 transition-all active:scale-95 cursor-pointer"
+                      className="py-3.5 rounded-2xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:hover:bg-emerald-600 text-white font-black text-sm flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/30 transition-all active:scale-95 cursor-pointer"
                     >
                       <PhoneCall className="w-5 h-5" />
                       <span>اتصال</span>
@@ -606,7 +348,7 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
                     <button
                       onClick={handleRedial}
                       disabled={!lastDialed}
-                      className="py-3.5 rounded-2xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300 font-semibold text-xs flex items-center justify-center gap-1.5 border border-slate-700 transition-all active:scale-95 cursor-pointer"
+                      className="py-3.5 rounded-2xl bg-slate-800 hover:bg-slate-750 disabled:opacity-40 text-slate-300 font-bold text-xs flex items-center justify-center gap-1.5 border border-slate-700 transition-all active:scale-95 cursor-pointer"
                       title={lastDialed ? `إعادة الاتصال بالرقم ${lastDialed}` : 'لا يوجد رقم سابق'}
                     >
                       <RotateCcw className="w-4 h-4" />
@@ -615,258 +357,52 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
                   </>
                 )}
               </div>
-
-              {/* Auxiliary Controls (Hold / Mute during call) */}
-              {currentCall && (
-                <div className="grid grid-cols-2 gap-2.5 mt-3 pt-3 border-t border-slate-800">
-                  <button
-                    onClick={() => onHoldToggle(currentCall.id)}
-                    className={`py-2.5 rounded-xl border text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                      currentCall.status === 'on_hold'
-                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/50'
-                        : 'bg-slate-800 text-slate-300 border-slate-700 hover:border-slate-600'
-                    }`}
-                  >
-                    {currentCall.status === 'on_hold' ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
-                    <span>{currentCall.status === 'on_hold' ? 'استئناف' : 'تعليق (Hold)'}</span>
-                  </button>
-
-                  <button
-                    onClick={() => setIsMuted(!isMuted)}
-                    className={`py-2.5 rounded-xl border text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                      isMuted
-                        ? 'bg-red-500/20 text-red-300 border-red-500/50'
-                        : 'bg-slate-800 text-slate-300 border-slate-700 hover:border-slate-600'
-                    }`}
-                  >
-                    {isMuted ? <MicOff className="w-4 h-4 text-red-400" /> : <Mic className="w-4 h-4" />}
-                    <span>{isMuted ? 'إلغاء الكتم' : 'كتم الميكروفون'}</span>
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Right Column (7 cols): [Caller Info & Timing] + [3CXPhone Integration Guide] */}
-          <div className="lg:col-span-7 space-y-5">
-            {/* 1. Caller Information & Live Timing Card (بيانات المستخدم المتصل والتوقيت) */}
-            <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-5 sm:p-6 shadow-xl relative overflow-hidden">
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-2">
-                  <User className="w-4 h-4 text-cyan-400" />
-                  <h2 className="text-sm font-bold text-white">بيانات المتصل والتوقيت اللحظي (Caller Info & Timing)</h2>
-                </div>
-                {currentCall && (
-                  <span className="flex items-center gap-1.5 text-xs font-bold text-emerald-400 bg-emerald-500/10 px-2.5 py-1 rounded-full border border-emerald-500/20 animate-pulse">
-                    <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                    <span>مكالمة نشطة الآن</span>
-                  </span>
-                )}
-              </div>
-
-              {currentCall ? (
-                currentCall.status === 'ringing' && currentCall.extension === currentUser.extension ? (
-                  /* Outbound Ringing State - Waiting for Employee to Answer */
-                  <div className="space-y-4">
-                    <div className="p-5 rounded-2xl bg-gradient-to-br from-amber-950/70 via-slate-900 to-slate-850 border-2 border-amber-500/50 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xl">
-                      <div className="flex items-center gap-3">
-                        <div className="w-14 h-14 rounded-2xl bg-amber-500/20 text-amber-400 border border-amber-500/40 flex items-center justify-center animate-pulse shrink-0">
-                          <PhoneOutgoing className="w-7 h-7 animate-bounce" />
-                        </div>
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs font-bold text-amber-300 bg-amber-500/20 border border-amber-500/40 px-2.5 py-0.5 rounded-full">
-                              جاري رنين خط الموظف... (Ringing)
-                            </span>
-                            <span className="text-xs font-mono font-bold text-slate-400 bg-slate-800 px-2 py-0.5 rounded-full">
-                              كود: {currentCall.callCode}
-                            </span>
-                          </div>
-                          <h3 className="text-lg font-black text-white mt-1.5">
-                            {currentCall.calleeName || currentCall.callerNumber}
-                          </h3>
-                          <div className="text-xs font-mono text-cyan-300 font-bold mt-0.5">
-                            تحويلة الموظف: #{currentCall.calleeExtension}
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="flex flex-col sm:items-end gap-2">
-                        <div className="text-xs text-amber-300 font-bold flex items-center gap-1.5">
-                          <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping" />
-                          <span>في انتظار فتح التطبيق والرد...</span>
-                        </div>
-                        <button
-                          onClick={() => onHangupCall(currentCall.id)}
-                          className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-black flex items-center gap-2 shadow-lg shadow-red-600/30 transition-all cursor-pointer"
-                        >
-                          <PhoneOff className="w-4 h-4" />
-                          <span>إلغاء المكالمة (Cancel)</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="p-3.5 rounded-xl bg-cyan-950/40 border border-cyan-500/30 text-xs text-slate-300 leading-relaxed flex items-center gap-2.5">
-                      <Sparkles className="w-4 h-4 text-cyan-400 shrink-0" />
-                      <span>
-                        تم إرسال الاتصال بنجاح عبر بروتوكول التطبيق الداخلي إلى الموظف. ما دام فاتح التطبيق ستظهر له شاشة الرد فوراً بدون أي برامج خارجية!
-                      </span>
-                    </div>
-                  </div>
-                ) : (
-                  /* Connected / Active Call Details */
-                  <div className="space-y-4">
-                    {/* Top Banner with Caller Name & Code */}
-                    <div className="p-4 rounded-2xl bg-gradient-to-br from-slate-800 to-slate-850 border border-slate-700 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs font-bold text-cyan-300 bg-cyan-500/20 border border-cyan-500/30 px-2 py-0.5 rounded-full">
-                            {currentCall.direction === 'inbound' ? 'واردة (Inbound)' : 'صادرة (Outbound)'}
-                          </span>
-                          <span className="text-xs font-bold font-mono text-amber-300 bg-amber-500/20 border border-amber-500/30 px-2 py-0.5 rounded-full">
-                            كود المكالمة: {currentCall.callCode}
-                          </span>
-                          {currentCall.isAppToApp && (
-                            <span className="text-xs font-bold text-emerald-300 bg-emerald-500/20 border border-emerald-500/30 px-2 py-0.5 rounded-full">
-                              مكالمة تطبيق داخلية
-                            </span>
-                          )}
-                        </div>
-                        <h3 className="text-lg font-black text-white mt-1.5">
-                          {currentCall.extension === currentUser.extension
-                            ? (currentCall.calleeName || currentCall.callerNumber)
-                            : currentCall.callerName}
-                        </h3>
-                        <div className="text-sm font-mono text-slate-300 font-bold mt-0.5">
-                          التحويلة / الرقم:{' '}
-                          {currentCall.extension === currentUser.extension
-                            ? currentCall.calleeExtension
-                            : (currentCall.callerExtension || currentCall.callerNumber)}
-                        </div>
-                      </div>
-
-                      {/* Live Timing / Stopwatch (التوقيت) */}
-                      <div className="bg-slate-950/80 border border-slate-700/80 rounded-2xl px-5 py-3 text-center sm:text-left shadow-inner">
-                        <div className="text-[11px] text-slate-400 flex items-center justify-center sm:justify-start gap-1 font-semibold mb-0.5">
-                          <Clock className="w-3.5 h-3.5 text-emerald-400" />
-                          <span>التوقيت والمدة الحية:</span>
-                        </div>
-                        <div className="text-2xl font-mono font-black text-emerald-400 tracking-wider">
-                          {formatSeconds(currentCall.duration)}
-                        </div>
-                        <div className="text-[10px] text-slate-500 font-mono mt-0.5">
-                          بدأت في: {currentCall.startTime}
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Channel & Recording Info */}
-                    <div className="grid grid-cols-2 gap-3 text-xs">
-                      <div className="p-3 rounded-xl bg-slate-800/60 border border-slate-700/50">
-                        <span className="text-slate-400 block text-[11px]">قناة Asterisk:</span>
-                        <span className="font-mono text-slate-200 font-bold truncate block mt-0.5">
-                          {currentCall.channelId}
-                        </span>
-                      </div>
-
-                      <div className="p-3 rounded-xl bg-slate-800/60 border border-slate-700/50 flex items-center justify-between">
-                        <div>
-                          <span className="text-slate-400 block text-[11px]">تسجيل المكالمة:</span>
-                          <span className="text-emerald-400 font-bold flex items-center gap-1 mt-0.5">
-                            <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-                            <span>جاري التسجيل آلياً</span>
-                          </span>
-                        </div>
-                        <button
-                          onClick={() => downloadCallAudioBlob(currentCall)}
-                          className="p-1.5 rounded-lg bg-cyan-950 hover:bg-cyan-900 text-cyan-300 border border-cyan-700/50 text-[11px] flex items-center gap-1 cursor-pointer"
-                          title="تحميل المقطع المسجل"
-                        >
-                          <Download className="w-3.5 h-3.5" />
-                          <span>WAV</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Quick Agent Notes */}
-                    <div>
-                      <label className="text-xs font-semibold text-slate-300 block mb-1">
-                        ملاحظات المكالمة السريعة:
-                      </label>
-                      <textarea
-                        rows={2}
-                        value={callNotes}
-                        onChange={(e) => setCallNotes(e.target.value)}
-                        placeholder="اكتب ملخص ما تم في المكالمة مع العميل..."
-                        className="w-full bg-slate-800 border border-slate-700 rounded-xl p-2.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500 resize-none"
-                      />
-                    </div>
-                  </div>
-                )
-              ) : (
-                /* Idle State */
-                <div className="py-8 px-4 text-center border border-dashed border-slate-800 rounded-2xl bg-slate-950/40">
-                  <div className="w-12 h-12 rounded-2xl bg-slate-800 text-slate-400 flex items-center justify-center mx-auto mb-3">
-                    <Headphones className="w-6 h-6 text-cyan-400" />
-                  </div>
-                  <h3 className="text-sm font-bold text-white">الخط جاهز ومتاح لاستقبال والمكالمات</h3>
-                  <p className="text-xs text-slate-400 max-w-md mx-auto mt-1 leading-relaxed">
-                    عند ورود أي مكالمة أو الاتصال بزميل عبر التطبيق، ستظهر هنا فوراً بيانات المتصل الكاملة واسمه ورقمه مع عداد التوقيت اللحظي بدقة.
-                  </p>
-                  <div className="mt-4 flex justify-center">
-                    <button
-                      onClick={onTriggerSimulatedCall}
-                      className="px-4 py-2 rounded-xl bg-cyan-600/20 hover:bg-cyan-600/30 text-cyan-300 border border-cyan-500/40 text-xs font-bold flex items-center gap-2 transition-all cursor-pointer"
-                    >
-                      <PhoneIncoming className="w-4 h-4 text-cyan-400" />
-                      <span>تجربة ظهور المتصل والتوقيت الآن</span>
-                    </button>
-                  </div>
-                </div>
-              )}
             </div>
 
-            {/* 2. Direct In-App Calling Directory (دليل الاتصال المباشر بين الموظفين داخل التطبيق) */}
-            <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-5 sm:p-6 shadow-xl">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-9 h-9 rounded-xl bg-cyan-500/20 text-cyan-400 flex items-center justify-center font-bold">
-                    <Users className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h2 className="text-sm font-bold text-white flex items-center gap-2">
-                      <span>دليل الاتصال المباشر بالموظفين (In-App Calling)</span>
-                      <span className="px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 text-[10px] font-mono font-bold border border-cyan-500/30">
-                        {users.length} موظف مسجل
-                      </span>
-                    </h2>
-                    <p className="text-[11px] text-slate-400">
-                      اتصال مباشر من المتصفح للمتصفح دون الحاجة لتطبيق 3CXPhone - ما دام الموظف فاتح التطبيق
-                    </p>
-                  </div>
-                </div>
+            {/* Colleagues / Extensions Directory (دليل التحويلات والاتصال المباشر) */}
+            <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-5 shadow-xl space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                  <Users className="w-4 h-4 text-cyan-400" />
+                  <span>دليل الموظفين والتحويلات</span>
+                </h3>
+                <span className="text-xs text-cyan-400 font-mono font-bold bg-cyan-500/15 px-2 py-0.5 rounded-full">
+                  {users.length} موظف
+                </span>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                {users.map((u) => {
-                  const isSelf = u.extension === currentUser.extension;
-                  const isOnline = onlineUsers?.[u.extension] && (Date.now() - onlineUsers[u.extension].lastSeen < 35000);
+              {/* Search Bar */}
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  value={searchDirectory}
+                  onChange={(e) => setSearchDirectory(e.target.value)}
+                  placeholder="ابحث بالاسم أو رقم التحويلة..."
+                  className="w-full bg-slate-800 border border-slate-700 rounded-xl pr-9 pl-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 text-right"
+                />
+              </div>
+
+              {/* Colleagues list */}
+              <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                {colleagues.map((u) => {
+                  const isSelf = String(u.extension).trim() === String(currentUser.extension).trim();
                   return (
                     <div
-                      key={u.id}
-                      className={`p-3 rounded-2xl border transition-all flex items-center justify-between gap-3 ${
+                      key={u.id || u.extension}
+                      className={`p-2.5 rounded-2xl border transition-all flex items-center justify-between gap-3 ${
                         isSelf
-                          ? 'bg-slate-800/40 border-slate-700/60'
-                          : 'bg-slate-850 hover:bg-slate-800 border-slate-800 hover:border-slate-700'
+                          ? 'bg-slate-800/30 border-slate-800'
+                          : 'bg-slate-800/80 hover:bg-slate-800 border-slate-700/60 hover:border-cyan-500/40'
                       }`}
                     >
                       <div className="flex items-center gap-2.5 min-w-0">
-                        <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-xs shrink-0 ${
+                        <div className={`w-8 h-8 rounded-xl flex items-center justify-center font-bold text-xs shrink-0 ${
                           isSelf ? 'bg-cyan-500/20 text-cyan-300' : 'bg-slate-700 text-white'
                         }`}>
                           {u.name.charAt(0)}
                         </div>
-                        <div className="min-w-0">
+                        <div className="min-w-0 text-right">
                           <div className="font-bold text-white text-xs truncate flex items-center gap-1.5">
                             <span>{u.name}</span>
                             {isSelf && (
@@ -879,205 +415,254 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
                             <span className="text-[10px] font-mono text-cyan-400 font-bold">
                               #{u.extension}
                             </span>
-                            {isOnline ? (
-                              <span className="flex items-center gap-1 text-[10px] font-bold text-emerald-400">
-                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                                <span>متواجد بالتطبيق</span>
-                              </span>
-                            ) : (
-                              <span className="flex items-center gap-1 text-[10px] text-slate-500">
-                                <span className="w-1.5 h-1.5 rounded-full bg-slate-600" />
-                                <span>غير متواجد</span>
-                              </span>
-                            )}
+                            <span className="flex items-center gap-1 text-[10px] text-emerald-400 font-medium">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                              <span>متاح للاتصال</span>
+                            </span>
                           </div>
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        {!isSelf && (
-                          <>
-                            <button
-                              onClick={() => onMakeCall(u.extension, u.name)}
-                              disabled={!!currentCall}
-                              className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-cyan-600 to-emerald-600 hover:from-cyan-500 hover:to-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-[11px] font-bold flex items-center gap-1 shadow-md shadow-cyan-600/20 transition-all cursor-pointer active:scale-95"
-                              title="اتصال مباشر بالموظف داخل التطبيق"
-                            >
-                              <Phone className="w-3 h-3" />
-                              <span>اتصال</span>
-                            </button>
-                            {onSwitchUser && (
-                              <button
-                                onClick={() => onSwitchUser(u)}
-                                className="p-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 text-[10px] transition-all cursor-pointer"
-                                title={`تجربة الدخول باسم (${u.name}) في نفس المتصفح`}
-                              >
-                                <UserCheck className="w-3.5 h-3.5" />
-                              </button>
-                            )}
-                          </>
-                        )}
-                      </div>
+                      {!isSelf && (
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            onClick={() => onMakeCall(u.extension, u.name)}
+                            disabled={!!currentCall}
+                            className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-cyan-600 to-emerald-600 hover:from-cyan-500 hover:to-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold flex items-center gap-1 shadow-md shadow-cyan-600/20 transition-all cursor-pointer active:scale-95"
+                          >
+                            <Phone className="w-3 h-3" />
+                            <span>اتصال</span>
+                          </button>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
               </div>
             </div>
+          </div>
 
-            {/* 2. 3CXPhone Integration Guide Card (الربط ببرنامج 3CXPhone) */}
-            <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-5 sm:p-6 shadow-xl">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+          {/* Right Column (7 Cols): شاشة المكالمة، بيانات المتصل والتوقيت اللحظي */}
+          <div className="lg:col-span-7 space-y-5">
+            {/* Active Call / Caller Details & Live Timing Card */}
+            <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-6 shadow-xl relative overflow-hidden">
+              <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-2">
-                  <Smartphone className="w-4 h-4 text-amber-400" />
-                  <h2 className="text-sm font-bold text-white">
-                    بيانات الربط ببرنامج 3CXPhone (Windows / Mobile)
-                  </h2>
+                  <User className="w-4 h-4 text-cyan-400" />
+                  <h2 className="text-sm font-bold text-white">بيانات المتصل والتوقيت اللحظي (Caller Info & Timing)</h2>
                 </div>
-                <button
-                  onClick={handleDownload3CXConfig}
-                  className="px-3 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer self-start sm:self-auto"
-                  title="تحميل ملف الإعداد التلقائي للتطبيق"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>تحميل ملف التكوين (.3cxconfig)</span>
-                </button>
+                {currentCall && currentCall.status === 'connected' && (
+                  <span className="flex items-center gap-1.5 text-xs font-bold text-emerald-400 bg-emerald-500/10 px-3 py-1 rounded-full border border-emerald-500/30 animate-pulse">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                    <span>مكالمة متصلة ونشطة الآن</span>
+                  </span>
+                )}
               </div>
 
-              <p className="text-xs text-slate-400 leading-relaxed mb-4">
-                قم بتنصيب تطبيق <span className="text-white font-semibold">3CXPhone</span> على جهازك (Windows أو الهاتف)، ثم افتح <strong>Accounts</strong> وأدخل البيانات التالية الخاصة بتحويلتك:
-              </p>
-
-              {/* Parameter Table with One-Click Copy */}
-              <div className="space-y-2 font-mono text-xs">
-                {/* Account Name */}
-                <div className="flex items-center justify-between p-2.5 rounded-xl bg-slate-800/80 border border-slate-700/60">
-                  <div>
-                    <span className="text-slate-400 font-sans text-[11px] block">اسم الحساب (Account Name):</span>
-                    <span className="text-white font-bold">{threeCXConfig.accountName}</span>
-                  </div>
-                  <button
-                    onClick={() => handleCopy('accountName', threeCXConfig.accountName)}
-                    className="p-1.5 rounded-lg bg-slate-700/50 hover:bg-slate-600 text-slate-300 hover:text-white transition-colors cursor-pointer"
-                    title="نسخ"
-                  >
-                    {copiedKey === 'accountName' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                  </button>
-                </div>
-
-                {/* Extension & ID */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <div className="flex items-center justify-between p-2.5 rounded-xl bg-slate-800/80 border border-slate-700/60">
-                    <div>
-                      <span className="text-slate-400 font-sans text-[11px] block">التحويلة (Extension):</span>
-                      <span className="text-cyan-300 font-bold">{threeCXConfig.extension}</span>
-                    </div>
-                    <button
-                      onClick={() => handleCopy('extension', threeCXConfig.extension)}
-                      className="p-1.5 rounded-lg bg-slate-700/50 hover:bg-slate-600 text-slate-300 hover:text-white transition-colors cursor-pointer"
-                    >
-                      {copiedKey === 'extension' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                    </button>
-                  </div>
-
-                  <div className="flex items-center justify-between p-2.5 rounded-xl bg-slate-800/80 border border-slate-700/60">
-                    <div>
-                      <span className="text-slate-400 font-sans text-[11px] block">اسم المستخدم / ID:</span>
-                      <span className="text-cyan-300 font-bold">{threeCXConfig.id}</span>
-                    </div>
-                    <button
-                      onClick={() => handleCopy('id', threeCXConfig.id)}
-                      className="p-1.5 rounded-lg bg-slate-700/50 hover:bg-slate-600 text-slate-300 hover:text-white transition-colors cursor-pointer"
-                    >
-                      {copiedKey === 'id' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                    </button>
-                  </div>
-                </div>
-
-                {/* Password & Server IP */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <div className="flex items-center justify-between p-2.5 rounded-xl bg-slate-800/80 border border-slate-700/60">
-                    <div>
-                      <span className="text-slate-400 font-sans text-[11px] block">كلمة المرور (Password):</span>
-                      <span className="text-amber-300 font-bold">{threeCXConfig.password}</span>
-                    </div>
-                    <button
-                      onClick={() => handleCopy('password', threeCXConfig.password)}
-                      className="p-1.5 rounded-lg bg-slate-700/50 hover:bg-slate-600 text-slate-300 hover:text-white transition-colors cursor-pointer"
-                    >
-                      {copiedKey === 'password' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                    </button>
-                  </div>
-
-                  <div className="flex items-center justify-between p-2.5 rounded-xl bg-slate-800/80 border border-slate-700/60">
-                    <div>
-                      <span className="text-slate-400 font-sans text-[11px] block">سيرفر البدالة (PBX Server IP):</span>
-                      <span className="text-white font-bold">{threeCXConfig.serverIp}</span>
-                    </div>
-                    <button
-                      onClick={() => handleCopy('serverIp', threeCXConfig.serverIp)}
-                      className="p-1.5 rounded-lg bg-slate-700/50 hover:bg-slate-600 text-slate-300 hover:text-white transition-colors cursor-pointer"
-                    >
-                      {copiedKey === 'serverIp' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                    </button>
-                  </div>
-                </div>
-
-                {/* Crucial Outbound Proxy Notice */}
-                <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between">
-                  <div className="text-[11px] font-sans">
-                    <span className="font-bold text-amber-300 block">تنبيه Outbound Proxy:</span>
-                    <span className="text-slate-300">يجب أن يكون خيار Outbound Proxy غير مفعل (Unchecked) في 3CXPhone.</span>
-                  </div>
-                  <button
-                    onClick={() => setIs3CXFixModalOpen(true)}
-                    className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 font-bold text-[11px] flex items-center gap-1 cursor-pointer"
-                  >
-                    <Wrench className="w-3 h-3" />
-                    <span>تفاصيل الإصلاح</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Status footer */}
-              <div className="mt-3.5 flex items-center justify-between text-xs text-slate-400 pt-3 border-t border-slate-800">
-                <div className="flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                  <span>حالة الخط: <strong>On Hook / جاهز للاتصال</strong></span>
-                </div>
-                <button
-                  onClick={() => setIs3CXFixModalOpen(true)}
-                  className="text-[11px] text-cyan-400 hover:text-cyan-300 font-bold underline cursor-pointer"
-                >
-                  حل مشكلة Not Connected في 3CX ➔
-                </button>
-              </div>
-            </div>
-
-            {/* 3. My Recent Calls (سجل مكالمات الموظف) */}
-            <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-5 sm:p-6 shadow-xl">
-              <h2 className="text-sm font-bold text-white mb-3 flex items-center gap-2">
-                <Clock className="w-4 h-4 text-cyan-400" />
-                <span>سجل مكالماتي الأخيرة ({currentUser.name})</span>
-              </h2>
-
-              {myHistory.length === 0 ? (
-                <p className="text-xs text-slate-400 py-3 text-center">لا توجد مكالمات سابقة مسجلة لتحويلتك حتى الآن.</p>
-              ) : (
-                <div className="divide-y divide-slate-800/80 text-xs">
-                  {myHistory.slice(0, 5).map((call) => (
-                    <div key={call.id} className="py-2.5 flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2.5">
-                        <div className="w-7 h-7 rounded-lg bg-slate-800 flex items-center justify-center text-slate-300">
-                          {call.direction === 'inbound' ? (
-                            <PhoneIncoming className="w-3.5 h-3.5 text-emerald-400" />
-                          ) : (
-                            <PhoneOutgoing className="w-3.5 h-3.5 text-cyan-400" />
-                          )}
+              {currentCall ? (
+                currentCall.status === 'ringing' ? (
+                  /* Outbound Ringing State (جاري الاتصال بالموظف) */
+                  <div className="space-y-4">
+                    <div className="p-6 rounded-2xl bg-gradient-to-br from-amber-950/80 via-slate-900 to-slate-850 border-2 border-amber-500/60 shadow-xl flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                      <div className="flex items-center gap-3.5">
+                        <div className="w-16 h-16 rounded-2xl bg-amber-500/20 text-amber-400 border border-amber-500/40 flex items-center justify-center animate-pulse shrink-0">
+                          <PhoneOutgoing className="w-8 h-8 animate-bounce" />
                         </div>
                         <div>
-                          <div className="font-bold text-white">{call.callerName}</div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-amber-300 bg-amber-500/20 border border-amber-500/40 px-2.5 py-0.5 rounded-full">
+                              جاري رنين خط الموظف... (Ringing)
+                            </span>
+                            <span className="text-xs font-mono font-bold text-slate-400 bg-slate-800 px-2.5 py-0.5 rounded-full">
+                              كود: {currentCall.callCode}
+                            </span>
+                          </div>
+                          <h3 className="text-xl font-black text-white mt-2">
+                            {currentCall.calleeName || currentCall.callerNumber}
+                          </h3>
+                          <div className="text-xs font-mono text-cyan-300 font-bold mt-0.5">
+                            التحويلة المستهدفة: #{currentCall.calleeExtension}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col sm:items-end gap-2.5">
+                        <div className="text-xs text-amber-300 font-bold flex items-center gap-1.5">
+                          <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping" />
+                          <span>في انتظار رد الموظف...</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {onSimulateRemoteAnswer && (
+                            <button
+                              onClick={() => onSimulateRemoteAnswer(currentCall.id)}
+                              className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black flex items-center gap-1.5 shadow-lg shadow-emerald-600/30 transition-all cursor-pointer active:scale-95"
+                              title="الرد على المكالمة فوراً في نفس المتصفح للتجربة"
+                            >
+                              <PhoneCall className="w-4 h-4" />
+                              <span>الرد فوراً</span>
+                            </button>
+                          )}
+                          <button
+                            onClick={() => onHangupCall(currentCall.id)}
+                            className="px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-black flex items-center gap-2 shadow-lg shadow-red-600/30 transition-all cursor-pointer active:scale-95"
+                          >
+                            <PhoneOff className="w-4 h-4" />
+                            <span>إلغاء</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="p-3.5 rounded-2xl bg-cyan-950/30 border border-cyan-500/30 text-xs text-slate-300 flex items-center gap-2.5">
+                      <Sparkles className="w-4 h-4 text-cyan-400 shrink-0" />
+                      <span>
+                        يتم إرسال إشارة الرنين الآن إلى شاشة الزميل مباشرة. بمجرد ضغطه على الرد ستتحول المكالمة تلقائياً لمكالمة متصلة ويبدأ عداد التوقيت.
+                      </span>
+                    </div>
+                  </div>
+                ) : (
+                  /* Connected Active Call State (المكالمة متصلة الآن) */
+                  <div className="space-y-4">
+                    {/* Top Call Info Card */}
+                    <div className="p-5 rounded-2xl bg-gradient-to-br from-slate-800 to-slate-850 border border-slate-700 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold text-cyan-300 bg-cyan-500/20 border border-cyan-500/30 px-2.5 py-0.5 rounded-full">
+                            {currentCall.direction === 'inbound' ? 'مكالمة واردة' : 'مكالمة صادرة'}
+                          </span>
+                          <span className="text-xs font-bold font-mono text-amber-300 bg-amber-500/20 border border-amber-500/30 px-2.5 py-0.5 rounded-full">
+                            كود: {currentCall.callCode}
+                          </span>
+                        </div>
+                        <h3 className="text-2xl font-black text-white mt-2">
+                          {String(currentCall.extension).trim() === String(currentUser.extension).trim()
+                            ? (currentCall.calleeName || currentCall.callerNumber)
+                            : currentCall.callerName}
+                        </h3>
+                        <div className="text-xs font-mono text-slate-300 font-bold mt-1">
+                          التحويلة / الرقم:{' '}
+                          {String(currentCall.extension).trim() === String(currentUser.extension).trim()
+                            ? `#${currentCall.calleeExtension}`
+                            : `#${currentCall.callerExtension || currentCall.callerNumber}`}
+                        </div>
+                      </div>
+
+                      {/* Live Call Duration Stopwatch (عداد التوقيت اللحظي بدقة) */}
+                      <div className="bg-slate-950/90 border border-slate-700 rounded-2xl px-6 py-3.5 text-center sm:text-left shadow-inner">
+                        <div className="text-[11px] text-slate-400 flex items-center justify-center sm:justify-start gap-1 font-semibold mb-0.5">
+                          <Clock className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>التوقيت اللحظي:</span>
+                        </div>
+                        <div className="text-3xl font-mono font-black text-emerald-400 tracking-wider">
+                          {formatSeconds(currentCall.duration)}
+                        </div>
+                        <div className="text-[10px] text-slate-500 font-mono mt-0.5">
+                          وقت البدء: {currentCall.startTime}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Active In-Call Controls */}
+                    <div className="grid grid-cols-3 gap-3">
+                      {/* Hang Up */}
+                      <button
+                        onClick={() => onHangupCall(currentCall.id)}
+                        className="py-3.5 rounded-2xl bg-red-600 hover:bg-red-500 text-white font-black text-xs sm:text-sm flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 transition-all active:scale-95 cursor-pointer"
+                      >
+                        <PhoneOff className="w-4 h-4 sm:w-5 sm:h-5" />
+                        <span>إنهاء المكالمة</span>
+                      </button>
+
+                      {/* Hold Toggle */}
+                      <button
+                        onClick={() => onHoldToggle(currentCall.id)}
+                        className={`py-3.5 rounded-2xl border text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                          currentCall.status === 'on_hold'
+                            ? 'bg-amber-500/20 text-amber-300 border-amber-500/50'
+                            : 'bg-slate-800 text-slate-300 border-slate-700 hover:border-slate-600'
+                        }`}
+                      >
+                        {currentCall.status === 'on_hold' ? <Play className="w-4 h-4 text-amber-400" /> : <Pause className="w-4 h-4" />}
+                        <span>{currentCall.status === 'on_hold' ? 'استئناف' : 'تعليق (Hold)'}</span>
+                      </button>
+
+                      {/* Mute Toggle */}
+                      <button
+                        onClick={() => setIsMuted(!isMuted)}
+                        className={`py-3.5 rounded-2xl border text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                          isMuted
+                            ? 'bg-red-500/20 text-red-300 border-red-500/50'
+                            : 'bg-slate-800 text-slate-300 border-slate-700 hover:border-slate-600'
+                        }`}
+                      >
+                        {isMuted ? <MicOff className="w-4 h-4 text-red-400" /> : <Mic className="w-4 h-4" />}
+                        <span>{isMuted ? 'إلغاء الكتم' : 'كتم الصوت'}</span>
+                      </button>
+                    </div>
+
+                    {/* Quick Call Notes */}
+                    <div>
+                      <label className="text-xs font-semibold text-slate-300 block mb-1.5">
+                        ملاحظات المكالمة:
+                      </label>
+                      <textarea
+                        rows={2}
+                        value={callNotes}
+                        onChange={(e) => setCallNotes(e.target.value)}
+                        placeholder="اكتب ملاحظات حول ما تم في المكالمة مع العميل أو الزميل..."
+                        className="w-full bg-slate-800/90 border border-slate-700 rounded-xl p-3 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500 resize-none text-right"
+                      />
+                    </div>
+                  </div>
+                )
+              ) : (
+                /* Idle Ready State (الخط متاح وجاهز) */
+                <div className="py-10 px-4 text-center border border-dashed border-slate-800 rounded-2xl bg-slate-950/40 space-y-3">
+                  <div className="w-14 h-14 rounded-2xl bg-slate-800/80 text-slate-400 flex items-center justify-center mx-auto shadow-inner">
+                    <Headphones className="w-7 h-7 text-cyan-400" />
+                  </div>
+                  <h3 className="text-base font-bold text-white">الخط متاح وجاهز لاستقبال وإجراء المكالمات</h3>
+                  <p className="text-xs text-slate-400 max-w-md mx-auto leading-relaxed">
+                    قم بإدخال رقم التحويلة من لوحة الأزرار أو اضغط على اسم أي موظف من الدليل للاتصال به فوراً. عند ورود أي مكالمة ستظهر لك بيانات المتصل والتحويلة مع عداد التوقيت اللحظي.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* My Recent Calls History */}
+            <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-5 sm:p-6 shadow-xl space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-cyan-400" />
+                  <span>سجل مكالماتي الأخيرة ({currentUser.name})</span>
+                </h3>
+                <span className="text-xs text-slate-400 font-mono">
+                  {myHistory.length} مكالمة
+                </span>
+              </div>
+
+              {myHistory.length === 0 ? (
+                <p className="text-xs text-slate-400 py-4 text-center">لا توجد مكالمات مسجلة لهذه التحويلة بعد.</p>
+              ) : (
+                <div className="divide-y divide-slate-800 text-xs">
+                  {myHistory.slice(0, 6).map((call) => (
+                    <div key={call.id} className="py-2.5 flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-8 h-8 rounded-xl bg-slate-800 flex items-center justify-center text-slate-300">
+                          {call.direction === 'inbound' ? (
+                            <PhoneIncoming className="w-4 h-4 text-emerald-400" />
+                          ) : (
+                            <PhoneOutgoing className="w-4 h-4 text-cyan-400" />
+                          )}
+                        </div>
+                        <div className="text-right">
+                          <div className="font-bold text-white">
+                            {String(call.extension).trim() === String(currentUser.extension).trim()
+                              ? (call.calleeName || call.callerNumber)
+                              : call.callerName}
+                          </div>
                           <div className="text-[10px] text-slate-400 font-mono">
-                            {call.callerNumber} • كود: {call.callCode}
+                            كود: {call.callCode} • {call.direction === 'inbound' ? 'واردة' : 'صادرة'}
                           </div>
                         </div>
                       </div>
@@ -1091,8 +676,8 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
                         </div>
                         <button
                           onClick={() => downloadCallAudioBlob(call)}
-                          className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 transition-colors cursor-pointer"
-                          title="تحميل التسجيل"
+                          className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-750 text-cyan-300 transition-colors cursor-pointer"
+                          title="تحميل تسجيل المكالمة"
                         >
                           <Download className="w-3.5 h-3.5" />
                         </button>
@@ -1106,12 +691,64 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
         </div>
       </main>
 
-      {/* 3CX Diagnostics and Fix Modal */}
-      <ThreeCXDiagnosticModal
-        isOpen={is3CXFixModalOpen}
-        onClose={() => setIs3CXFixModalOpen(false)}
-        currentUser={currentUser}
-      />
+      {/* Switch User Modal for effortless multi-user testing */}
+      {isSwitchUserOpen && onSwitchUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md animate-in fade-in">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-md p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <UserCheck className="w-4 h-4 text-cyan-400" />
+                <span>التبديل إلى موظف آخر</span>
+              </h3>
+              <button
+                onClick={() => setIsSwitchUserOpen(false)}
+                className="text-slate-400 hover:text-white text-xs cursor-pointer"
+              >
+                إغلاق ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              اختر الموظف الذي ترغب بالدخول بحسابه لتجربة استقبال وإجراء المكالمات فوراً:
+            </p>
+
+            <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+              {users.map((u) => {
+                const isCurrent = String(u.extension).trim() === String(currentUser.extension).trim();
+                return (
+                  <button
+                    key={u.id}
+                    onClick={() => {
+                      onSwitchUser(u);
+                      setIsSwitchUserOpen(false);
+                    }}
+                    className={`w-full p-3 rounded-2xl border text-right transition-all flex items-center justify-between cursor-pointer ${
+                      isCurrent
+                        ? 'bg-cyan-950/50 border-cyan-500/60 text-white'
+                        : 'bg-slate-800/80 hover:bg-slate-800 border-slate-700 text-slate-200'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-8 h-8 rounded-xl bg-cyan-500/20 text-cyan-300 font-bold flex items-center justify-center text-xs">
+                        {u.name.charAt(0)}
+                      </div>
+                      <div>
+                        <div className="text-xs font-bold">{u.name}</div>
+                        <div className="text-[10px] text-cyan-400 font-mono">تحويلة #{u.extension} ({u.role === 'admin' ? 'مدير' : 'موظف'})</div>
+                      </div>
+                    </div>
+                    {isCurrent && (
+                      <span className="text-[10px] bg-cyan-500/20 text-cyan-300 px-2 py-0.5 rounded-full font-bold">
+                        الحالي
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
