@@ -260,13 +260,20 @@ export default function App() {
     });
 
     const unsubDeleted = subscribeDeletedUsers((deletedMap) => {
-      setUsers((prev) => prev.filter((u) => !deletedMap[u.id] && !deletedMap[u.extension]));
+      setUsers((prev) => {
+        const filtered = prev.filter((u) => !deletedMap[u.id] && !deletedMap[u.extension]);
+        return filtered.length === prev.length ? prev : filtered;
+      });
       setOnlineUsers((prev) => {
+        let changed = false;
         const next = { ...prev };
         for (const k in deletedMap) {
-          delete next[k];
+          if (next[k]) {
+            delete next[k];
+            changed = true;
+          }
         }
-        return next;
+        return changed ? next : prev;
       });
       if (
         currentUserRef.current &&
@@ -466,6 +473,7 @@ export default function App() {
         if (isTarget && isNotSelf && call.status === 'ringing') {
           setIncomingCall(call);
           startIncomingRing();
+          setActiveCalls((prev) => [call, ...prev.filter((c) => c.id !== call.id)]);
         }
       } else if (data.type === 'CALL_UPDATED') {
         const { callId, updates } = data;
@@ -478,7 +486,7 @@ export default function App() {
           stopRingback();
           stopIncomingRing();
           stopHoldMusic();
-          webrtcVoice.endVoiceSession(callId);
+          webrtcVoice.endVoiceSession(callId, false);
           playTelephonyFx('hangup');
           setIncomingCall(null);
         }
@@ -569,7 +577,7 @@ export default function App() {
     stopHoldMusic();
     stopRingback();
     stopIncomingRing();
-    webrtcVoice.endVoiceSession();
+    webrtcVoice.endVoiceSession(callId, true);
     playTelephonyFx('hangup');
     const callToArchive = activeCalls.find((c) => c.id === callId);
     if (callToArchive) {
@@ -844,8 +852,8 @@ export default function App() {
             },
           })
           .catch((e) => console.debug('Admin WebRTC voice session note:', e));
-      } else if (!myActiveCall || myActiveCall.status === 'ended') {
-        webrtcVoice.endVoiceSession();
+      } else if (!myActiveCall || myActiveCall.status === 'ended' || myActiveCall.status === 'missed') {
+        webrtcVoice.endVoiceSession(undefined, false);
       }
     }
   }, [myActiveCall?.id, myActiveCall?.status, currentUser?.role, adminPreviewAgent, myExtNorm]);

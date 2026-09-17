@@ -42,9 +42,6 @@ const ICE_SERVERS: RTCConfiguration = {
     { urls: 'stun:stun2.l.google.com:19302' },
     { urls: 'stun:stun3.l.google.com:19302' },
     { urls: 'stun:stun4.l.google.com:19302' },
-    { urls: 'stun:global.stun.twilio.com:3478' },
-    { urls: 'stun:stun.services.mozilla.com' },
-    { urls: 'stun:stun.cloudflare.com:3478' },
   ],
   iceCandidatePoolSize: 10,
 };
@@ -665,8 +662,12 @@ class WebRTCVoiceService {
         this.cleanupSession(true);
         return;
       } else if (data.type === 'callee-ready' && this.isCaller) {
-        // Re-send offer if callee announced readiness
-        if (this.peerConnection.localDescription) {
+        // Only re-send offer if caller is still waiting for answer
+        if (
+          this.peerConnection &&
+          this.peerConnection.signalingState === 'have-local-offer' &&
+          this.peerConnection.localDescription
+        ) {
           const plainOffer = serializeSdp(this.peerConnection.localDescription);
           await this.sendSignal({
             type: 'sdp-offer',
@@ -677,6 +678,7 @@ class WebRTCVoiceService {
         }
       } else if (data.type === 'sdp-offer' && !this.isCaller) {
         // Callee receives offer from Caller
+        if (!this.peerConnection) return;
         if (this.peerConnection.signalingState !== 'stable') {
           console.debug('Signaling state is not stable, rolling back');
           await this.peerConnection.setLocalDescription({ type: 'rollback' } as any).catch(() => {});
@@ -705,7 +707,7 @@ class WebRTCVoiceService {
         });
       } else if (data.type === 'sdp-answer' && this.isCaller) {
         // Caller receives answer from Callee
-        if (this.peerConnection.signalingState === 'have-local-offer') {
+        if (this.peerConnection && this.peerConnection.signalingState === 'have-local-offer') {
           const sdpInit: RTCSessionDescriptionInit = {
             type: data.sdp?.type || 'answer',
             sdp: data.sdp?.sdp || data.sdp,
@@ -716,15 +718,14 @@ class WebRTCVoiceService {
         }
       } else if (data.type === 'ice-candidate' && data.candidate) {
         const sanitized = sanitizeCandidateInit(data.candidate);
-        if (sanitized) {
+        if (sanitized && this.peerConnection) {
           const key = `${sanitized.candidate}|${sanitized.sdpMid || ''}|${sanitized.sdpMLineIndex ?? ''}`;
           if (!this.processedCandidateKeys.has(key)) {
             this.processedCandidateKeys.add(key);
             if (this.hasRemoteDescription && this.peerConnection.remoteDescription) {
               try {
-                await this.peerConnection.addIceCandidate(new RTCIceCandidate(sanitized));
+                await this.peerConnection.addIceCandidate(sanitized);
               } catch (e) {
-                console.debug('Queueing candidate after failed direct add:', e);
                 this.pendingCandidates.push(sanitized);
               }
             } else {
@@ -748,10 +749,7 @@ class WebRTCVoiceService {
 
     for (const cand of list) {
       try {
-        const sanitized = sanitizeCandidateInit(cand);
-        if (sanitized) {
-          await this.peerConnection.addIceCandidate(new RTCIceCandidate(sanitized));
-        }
+        await this.peerConnection.addIceCandidate(cand);
       } catch (e) {
         console.debug('Error flushing ICE candidate:', e);
       }
@@ -790,7 +788,13 @@ class WebRTCVoiceService {
       track.enabled = true;
     });
 
+    // Remove old src attribute if a silent data URI was previously set, to avoid conflict with srcObject
+    if (this.remoteAudioElement.hasAttribute('src')) {
+      this.remoteAudioElement.removeAttribute('src');
+    }
+
     this.remoteAudioElement.srcObject = stream;
+    this.remoteAudioElement.muted = false;
     this.remoteAudioElement.volume = 1.0;
 
     const playPromise = this.remoteAudioElement.play();
@@ -798,7 +802,11 @@ class WebRTCVoiceService {
       playPromise.catch((err) => {
         console.warn('Autoplay requires user gesture:', err);
         const unlock = () => {
-          this.remoteAudioElement?.play().catch(() => {});
+          if (this.remoteAudioElement) {
+            this.remoteAudioElement.muted = false;
+            this.remoteAudioElement.volume = 1.0;
+            this.remoteAudioElement.play().catch(() => {});
+          }
           window.removeEventListener('click', unlock);
           window.removeEventListener('touchstart', unlock);
         };
@@ -828,14 +836,14 @@ class WebRTCVoiceService {
       const remoteSource = this.audioCtx.createMediaStreamSource(stream);
       this.remoteAnalyser = this.audioCtx.createAnalyser();
       this.remoteAnalyser.fftSize = 64;
+
+      // Safe pull node: routes through zero-gain so Chromium's audio graph pulls frames
+      // without producing double audio or muting the <audio> element
+      const silentPull = this.audioCtx.createGain();
+      silentPull.gain.value = 0.0;
       remoteSource.connect(this.remoteAnalyser);
-
-      // Create gain amplifier node for loudspeaker boost
-      this.remoteGainNode = this.audioCtx.createGain();
-      this.remoteGainNode.gain.value = this.isSpeakerphone ? this.speakerphoneGain : 1.0;
-
-      // Note: We leave remoteAudioElement playing the primary stream
-      // When speakerphone is active, setSinkId and element volume or gain will amplify
+      this.remoteAnalyser.connect(silentPull);
+      silentPull.connect(this.audioCtx.destination);
     } catch (e) {
       console.debug('Remote audio amplifier setup note:', e);
     }
@@ -950,31 +958,40 @@ class WebRTCVoiceService {
       const localDataArray = new Uint8Array(bufferLength);
       const remoteDataArray = new Uint8Array(bufferLength);
 
-      const checkVolume = () => {
-        // 1. Local mic level
-        if (this.localAnalyser && !this.isMuted) {
-          this.localAnalyser.getByteFrequencyData(localDataArray);
-          let sum = 0;
-          for (let i = 0; i < bufferLength; i++) {
-            sum += localDataArray[i];
-          }
-          const avg = sum / bufferLength;
-          const normalized = Math.min(100, Math.round((avg / 255) * 100));
-          this.events.onAudioLevel?.(normalized, 'local');
-        } else if (this.isMuted) {
-          this.events.onAudioLevel?.(0, 'local');
-        }
+      let lastDispatchTime = 0;
 
-        // 2. Remote voice level
-        if (this.remoteAnalyser) {
-          this.remoteAnalyser.getByteFrequencyData(remoteDataArray);
-          let sumRemote = 0;
-          for (let i = 0; i < bufferLength; i++) {
-            sumRemote += remoteDataArray[i];
+      const checkVolume = () => {
+        const now = performance.now();
+
+        // Throttle emissions to ~10-12 updates per second (every 85ms) to prevent UI thread saturation
+        if (now - lastDispatchTime >= 85) {
+          lastDispatchTime = now;
+
+          // 1. Local mic level
+          if (this.localAnalyser && !this.isMuted) {
+            this.localAnalyser.getByteFrequencyData(localDataArray);
+            let sum = 0;
+            for (let i = 0; i < bufferLength; i++) {
+              sum += localDataArray[i];
+            }
+            const avg = sum / bufferLength;
+            const normalized = Math.min(100, Math.round((avg / 255) * 100));
+            this.events.onAudioLevel?.(normalized, 'local');
+          } else if (this.isMuted) {
+            this.events.onAudioLevel?.(0, 'local');
           }
-          const avgRemote = sumRemote / bufferLength;
-          const normalizedRemote = Math.min(100, Math.round((avgRemote / 255) * 100));
-          this.events.onAudioLevel?.(normalizedRemote, 'remote');
+
+          // 2. Remote voice level
+          if (this.remoteAnalyser) {
+            this.remoteAnalyser.getByteFrequencyData(remoteDataArray);
+            let sumRemote = 0;
+            for (let i = 0; i < bufferLength; i++) {
+              sumRemote += remoteDataArray[i];
+            }
+            const avgRemote = sumRemote / bufferLength;
+            const normalizedRemote = Math.min(100, Math.round((avgRemote / 255) * 100));
+            this.events.onAudioLevel?.(normalizedRemote, 'remote');
+          }
         }
 
         this.animFrameId = requestAnimationFrame(checkVolume);
@@ -1034,7 +1051,7 @@ class WebRTCVoiceService {
   /**
    * Cleanup session internal resources
    */
-  private cleanupSession(emitEnded: boolean = true) {
+  private cleanupSession(emitEnded: boolean = true, clearSignals: boolean = false) {
     if (this.animFrameId) {
       cancelAnimationFrame(this.animFrameId);
       this.animFrameId = null;
@@ -1046,7 +1063,9 @@ class WebRTCVoiceService {
     }
 
     if (this.peerConnection) {
-      this.peerConnection.close();
+      try {
+        this.peerConnection.close();
+      } catch {}
       this.peerConnection = null;
     }
 
@@ -1057,8 +1076,8 @@ class WebRTCVoiceService {
       this.remoteAudioElement.srcObject = null;
     }
 
-    // Clean signal in RTDB for finished call
-    if (this.currentCallId) {
+    // Only clean signal in RTDB if call is permanently finished
+    if (clearSignals && this.currentCallId) {
       const callId = this.currentCallId;
       try {
         remove(ref(rtdb, `webrtc_signals/${callId}`));
@@ -1082,9 +1101,9 @@ class WebRTCVoiceService {
   /**
    * End voice session and cleanup audio tracks
    */
-  public endVoiceSession(explicitCallId?: string) {
+  public endVoiceSession(explicitCallId?: string, notifyRemote: boolean = false) {
     const targetCallId = explicitCallId || this.currentCallId;
-    if (targetCallId) {
+    if (notifyRemote && targetCallId) {
       try {
         this.sendSignal({
           type: 'call-ended',
@@ -1100,7 +1119,7 @@ class WebRTCVoiceService {
         }).catch(() => {});
       } catch {}
     }
-    this.cleanupSession(true);
+    this.cleanupSession(false, notifyRemote);
   }
 }
 

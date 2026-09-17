@@ -112,8 +112,8 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
   useEffect(() => {
     if (currentCall && currentCall.status === 'connected') {
       const isCaller =
-        String(currentCall.callerExtension || currentCall.extension).trim() ===
-        String(currentUser.extension).trim();
+        cleanExt(currentCall.callerExtension || currentCall.extension) ===
+        cleanExt(currentUser.extension);
 
       setVoiceStatus('connecting');
       setVoiceNotice('جاري ربط المايكروفون وبدء المحادثة الصوتية الحية...');
@@ -121,7 +121,7 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
       webrtcVoice
         .startVoiceSession(currentCall.id, isCaller, {
           onAudioLevel: (lvl) => {
-            setVoiceLevel(lvl);
+            setVoiceLevel((prev) => (Math.abs(prev - lvl) > 3 ? lvl : prev));
           },
           onStatusChange: (st) => {
             if (st === 'connected') {
@@ -144,13 +144,13 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
         .catch(() => {});
 
       return () => {
-        webrtcVoice.endVoiceSession();
+        webrtcVoice.endVoiceSession(currentCall.id, false);
         setVoiceStatus('idle');
         setVoiceLevel(0);
         setVoiceNotice(null);
       };
-    } else {
-      webrtcVoice.endVoiceSession();
+    } else if (!currentCall || currentCall.status === 'ended' || currentCall.status === 'missed') {
+      webrtcVoice.endVoiceSession(undefined, false);
       setVoiceStatus('idle');
       setVoiceLevel(0);
       setVoiceNotice(null);
