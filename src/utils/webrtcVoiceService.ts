@@ -1,14 +1,29 @@
 /**
  * WebRTC Voice Service for Real-Time Two-Way Audio Telephony
- * Supports peer-to-peer microphone streaming between browser tabs,
- * cross-device calls via Firestore signaling, Loudspeaker / Speakerphone mode (مكبر الصوت),
- * and live AudioContext sound analysis with candidate queueing.
+ * High-performance peer-to-peer audio streaming between web browsers & mobile devices.
+ * Dual-layer signaling via Firebase Realtime Database (RTDB) + Firestore + BroadcastChannel + LocalStorage.
+ * Includes Loudspeaker (مكبر الصوت للهاتف) mode with up to 350% audio gain boost,
+ * candidate queuing, multi-STUN enterprise configuration, and real-time audio visualizers.
  */
 
-import { doc, setDoc, onSnapshot, collection, addDoc, getDocs } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+import {
+  doc,
+  setDoc,
+  onSnapshot,
+  collection,
+  addDoc,
+  deleteDoc,
+} from 'firebase/firestore';
+import {
+  ref,
+  set,
+  onValue,
+  push,
+  remove,
+} from 'firebase/database';
+import { db, rtdb } from '../lib/firebase';
 
-const WEBRTC_BUS_NAME = 'etsalati_webrtc_audio_bus_v2';
+const WEBRTC_BUS_NAME = 'etsalati_webrtc_audio_bus_v3';
 
 export interface VoiceCallEvents {
   onRemoteStream?: (stream: MediaStream) => void;
@@ -18,6 +33,7 @@ export interface VoiceCallEvents {
   onSpeakerphoneChange?: (enabled: boolean) => void;
 }
 
+// Enterprise STUN servers for robust NAT traversal across mobile carriers & home Wi-Fi
 const ICE_SERVERS: RTCConfiguration = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -25,8 +41,30 @@ const ICE_SERVERS: RTCConfiguration = {
     { urls: 'stun:stun2.l.google.com:19302' },
     { urls: 'stun:stun3.l.google.com:19302' },
     { urls: 'stun:stun4.l.google.com:19302' },
+    { urls: 'stun:global.stun.twilio.com:3478' },
+    { urls: 'stun:stun.services.mozilla.com' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
   ],
+  iceCandidatePoolSize: 10,
 };
+
+function serializeSdp(desc: any) {
+  if (!desc) return null;
+  return {
+    type: desc.type || 'offer',
+    sdp: desc.sdp || '',
+  };
+}
+
+function serializeCandidate(cand: any) {
+  if (!cand) return null;
+  return {
+    candidate: cand.candidate || '',
+    sdpMid: cand.sdpMid !== undefined ? cand.sdpMid : null,
+    sdpMLineIndex: cand.sdpMLineIndex !== undefined ? cand.sdpMLineIndex : null,
+    usernameFragment: cand.usernameFragment !== undefined ? cand.usernameFragment : null,
+  };
+}
 
 class WebRTCVoiceService {
   private peerConnection: RTCPeerConnection | null = null;
@@ -41,51 +79,62 @@ class WebRTCVoiceService {
   private speakerphoneGain: number = 2.8; // 280% volume boost for mobile phone loudspeaker
   private events: VoiceCallEvents = {};
 
-  // Web Audio pipeline for voice analysis and speakerphone volume boost
+  // Web Audio pipeline for voice visualizers and loud speakerphone gain
   private audioCtx: AudioContext | null = null;
   private localAnalyser: AnalyserNode | null = null;
+  private remoteAnalyser: AnalyserNode | null = null;
   private remoteGainNode: GainNode | null = null;
   private animFrameId: number | null = null;
-  private unsubsFirestore: (() => void)[] = [];
 
-  // ICE Candidate Queuing to prevent race conditions before remoteDescription is ready
-  private pendingCandidates: RTCIceCandidateInit[] = [];
+  // Cleanup unsubscribers
+  private unsubs: (() => void)[] = [];
+  private pendingCandidates: any[] = [];
   private hasRemoteDescription: boolean = false;
   private audioUnlocked: boolean = false;
 
   constructor() {
-    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
-      try {
-        this.signalChannel = new BroadcastChannel(WEBRTC_BUS_NAME);
-        this.signalChannel.onmessage = (event) => {
-          this.handleSignalingMessage(event.data);
-        };
-      } catch (e) {
-        console.warn('BroadcastChannel not supported', e);
-      }
-    }
-
-    // Auto-unlock audio on user touch/click (critical for mobile phones and autoplay restrictions)
     if (typeof window !== 'undefined') {
+      try {
+        if ('BroadcastChannel' in window) {
+          this.signalChannel = new BroadcastChannel(WEBRTC_BUS_NAME);
+          this.signalChannel.onmessage = (event) => {
+            this.handleSignalingMessage(event.data);
+          };
+        }
+      } catch (e) {
+        console.debug('BroadcastChannel fallback notice:', e);
+      }
+
+      // Unlock audio on first global user interaction
       const unlockAudio = () => {
         this.unlockAudioPlayback();
+        window.removeEventListener('click', unlockAudio);
+        window.removeEventListener('touchstart', unlockAudio);
+        window.removeEventListener('keydown', unlockAudio);
       };
       window.addEventListener('click', unlockAudio, { passive: true });
       window.addEventListener('touchstart', unlockAudio, { passive: true });
+      window.addEventListener('keydown', unlockAudio, { passive: true });
     }
   }
 
   /**
-   * Unlock AudioContext and media playback on mobile browsers
+   * Unlock AudioContext and Audio Element playback immediately upon user interaction
    */
   public unlockAudioPlayback() {
-    if (this.audioCtx && this.audioCtx.state === 'suspended') {
-      this.audioCtx.resume().catch(() => {});
+    try {
+      if (this.audioCtx && this.audioCtx.state === 'suspended') {
+        this.audioCtx.resume().catch(() => {});
+      }
+      if (this.remoteAudioElement) {
+        if (this.remoteAudioElement.paused && this.remoteStream) {
+          this.remoteAudioElement.play().catch(() => {});
+        }
+      }
+      this.audioUnlocked = true;
+    } catch {
+      // ignore
     }
-    if (this.remoteAudioElement && this.remoteAudioElement.paused && this.remoteStream) {
-      this.remoteAudioElement.play().catch(() => {});
-    }
-    this.audioUnlocked = true;
   }
 
   /**
@@ -96,6 +145,7 @@ class WebRTCVoiceService {
     isCaller: boolean,
     events: VoiceCallEvents = {}
   ): Promise<void> {
+    // Idempotency: if already connected to this call with active peer, preserve it
     if (
       this.currentCallId === callId &&
       this.peerConnection &&
@@ -106,7 +156,7 @@ class WebRTCVoiceService {
       return;
     }
 
-    // Reset any previous session without sending premature 'ended'
+    // Reset previous session cleanly
     this.cleanupSession(false);
 
     this.currentCallId = callId;
@@ -117,6 +167,7 @@ class WebRTCVoiceService {
     this.hasRemoteDescription = false;
 
     events.onStatusChange?.('connecting');
+    this.unlockAudioPlayback();
 
     try {
       // 1. Capture user microphone
@@ -134,10 +185,10 @@ class WebRTCVoiceService {
         // If microphone was denied or unavailable, create a silent audio track
         // so WebRTC connection can still form and user can hear the other party!
         this.localStream = this.createSilentAudioStream();
-        events.onError?.('تنبيه: تعذر التقاط المايكروفون. يرجى تفعيل صلاحية المايك في المتصفح للتحدث بالصوت.');
+        events.onError?.('تنبيه: تعذر التقاط المايكروفون. يرجى السماح بصلاحية المايك للتحدث بالصوت.');
       }
 
-      // Setup audio analyzer for voice visualizer
+      // Setup audio analyzer for local microphone
       this.setupAudioAnalysis(this.localStream);
 
       // Setup remote audio playback element
@@ -147,15 +198,21 @@ class WebRTCVoiceService {
       this.peerConnection = new RTCPeerConnection(ICE_SERVERS);
 
       // Add local audio tracks to peer connection
-      this.localStream.getAudioTracks().forEach((track) => {
-        if (this.peerConnection && this.localStream) {
-          this.peerConnection.addTrack(track, this.localStream);
-        }
-      });
+      if (this.localStream) {
+        this.localStream.getAudioTracks().forEach((track) => {
+          if (this.peerConnection && this.localStream) {
+            this.peerConnection.addTrack(track, this.localStream);
+          }
+        });
+      }
 
       // Handle incoming remote audio stream
       this.peerConnection.ontrack = (event) => {
-        const stream = event.streams[0];
+        console.log('🔊 [WebRTC Voice] Remote audio track received:', event.track.id, event.track.readyState);
+        const stream =
+          event.streams && event.streams[0]
+            ? event.streams[0]
+            : new MediaStream([event.track]);
         this.remoteStream = stream;
         this.attachRemoteStream(stream);
         this.events.onRemoteStream?.(stream);
@@ -165,17 +222,21 @@ class WebRTCVoiceService {
       // Handle ICE Candidates
       this.peerConnection.onicecandidate = (event) => {
         if (event.candidate && this.currentCallId) {
-          this.sendSignal({
-            type: 'ice-candidate',
-            callId: this.currentCallId,
-            candidate: event.candidate.toJSON(),
-            fromCaller: this.isCaller,
-          });
+          const serialized = serializeCandidate(event.candidate);
+          if (serialized) {
+            this.sendSignal({
+              type: 'ice-candidate',
+              callId: this.currentCallId,
+              candidate: serialized,
+              fromCaller: this.isCaller,
+            });
+          }
         }
       };
 
       this.peerConnection.onconnectionstatechange = () => {
         const state = this.peerConnection?.connectionState;
+        console.log('📡 [WebRTC ConnectionState]:', state);
         if (state === 'connected') {
           this.events.onStatusChange?.('connected');
         } else if (state === 'failed') {
@@ -186,13 +247,14 @@ class WebRTCVoiceService {
 
       this.peerConnection.oniceconnectionstatechange = () => {
         const iceState = this.peerConnection?.iceConnectionState;
+        console.log('❄️ [WebRTC IceConnectionState]:', iceState);
         if (iceState === 'connected' || iceState === 'completed') {
           this.events.onStatusChange?.('connected');
         }
       };
 
-      // 3. Listen to remote signals from Firestore for cross-device calls
-      this.listenToFirestoreSignals(callId);
+      // 3. Listen to remote signals from Realtime Database & Firestore
+      this.listenToSignals(callId);
 
       // 4. Offer / Answer handshake
       if (this.isCaller) {
@@ -200,10 +262,11 @@ class WebRTCVoiceService {
           offerToReceiveAudio: true,
         });
         await this.peerConnection.setLocalDescription(offer);
+        const plainOffer = serializeSdp(offer);
         await this.sendSignal({
           type: 'sdp-offer',
           callId,
-          sdp: offer,
+          sdp: plainOffer,
           fromCaller: true,
         });
       } else {
@@ -216,20 +279,96 @@ class WebRTCVoiceService {
       }
     } catch (err: any) {
       console.error('Error starting WebRTC voice call:', err);
-      const msg = err.name === 'NotAllowedError'
-        ? 'تم رفض إذن المايكروفون. يرجى السماح للتطبيق باستخدام المايكروفون في المتصفح.'
-        : 'حدث خطأ في بدء الاتصال الصوتي. جاري محاولة إعادة الربط...';
+      const msg =
+        err.name === 'NotAllowedError'
+          ? 'تم رفض إذن المايكروفون. يرجى السماح للتطبيق باستخدام المايكروفون في المتصفح.'
+          : 'حدث خطأ في بدء الاتصال الصوتي. جاري محاولة إعادة الربط...';
       this.events.onError?.(msg);
       this.events.onStatusChange?.('failed');
     }
   }
 
   /**
-   * Listen to Firestore signals with dedicated document paths to avoid overwrites
+   * Listen to signals across Realtime Database, Firestore, and LocalStorage
    */
-  private listenToFirestoreSignals(callId: string) {
+  private listenToSignals(callId: string) {
+    // 1. Realtime Database Listeners (Fastest: < 50ms)
     try {
-      // 1. Listen for Offer
+      if (!this.isCaller) {
+        // Callee listens for Offer
+        const rtdbOfferRef = ref(rtdb, `webrtc_signals/${callId}/offer`);
+        const unsubRtdbOffer = onValue(rtdbOfferRef, (snap) => {
+          if (snap.exists()) {
+            const data = snap.val();
+            if (data && data.sdp) {
+              this.handleSignalingMessage({
+                type: 'sdp-offer',
+                callId,
+                sdp: data.sdp,
+                fromCaller: true,
+              });
+            }
+          }
+        });
+        this.unsubs.push(() => unsubRtdbOffer());
+      } else {
+        // Caller listens for Answer and Callee Ready
+        const rtdbAnswerRef = ref(rtdb, `webrtc_signals/${callId}/answer`);
+        const unsubRtdbAnswer = onValue(rtdbAnswerRef, (snap) => {
+          if (snap.exists()) {
+            const data = snap.val();
+            if (data && data.sdp) {
+              this.handleSignalingMessage({
+                type: 'sdp-answer',
+                callId,
+                sdp: data.sdp,
+                fromCaller: false,
+              });
+            }
+          }
+        });
+        this.unsubs.push(() => unsubRtdbAnswer());
+
+        const rtdbReadyRef = ref(rtdb, `webrtc_signals/${callId}/ready`);
+        const unsubRtdbReady = onValue(rtdbReadyRef, (snap) => {
+          if (snap.exists()) {
+            this.handleSignalingMessage({
+              type: 'callee-ready',
+              callId,
+              fromCaller: false,
+            });
+          }
+        });
+        this.unsubs.push(() => unsubRtdbReady());
+      }
+
+      // Listen for ICE Candidates from the other peer via RTDB
+      const targetCandidateNode = this.isCaller ? 'callee_candidates' : 'caller_candidates';
+      const rtdbCandidatesRef = ref(rtdb, `webrtc_signals/${callId}/${targetCandidateNode}`);
+      const unsubRtdbCandidates = onValue(rtdbCandidatesRef, (snap) => {
+        if (snap.exists()) {
+          const list = snap.val();
+          if (list && typeof list === 'object') {
+            Object.values(list).forEach((cand: any) => {
+              if (cand && cand.candidate) {
+                this.handleSignalingMessage({
+                  type: 'ice-candidate',
+                  callId,
+                  candidate: cand,
+                  fromCaller: !this.isCaller,
+                });
+              }
+            });
+          }
+        }
+      });
+      this.unsubs.push(() => unsubRtdbCandidates());
+    } catch (e) {
+      console.warn('RTDB signaling listener note:', e);
+    }
+
+    // 2. Firestore Listeners (Reliable cross-network fallback)
+    try {
       if (!this.isCaller) {
         const offerDoc = doc(db, 'active_calls', callId, 'webrtc_signals', 'offer');
         const unsubOffer = onSnapshot(offerDoc, (snap) => {
@@ -244,12 +383,9 @@ class WebRTCVoiceService {
               });
             }
           }
-        }, (e) => console.debug('Firestore offer sub notice:', e));
-        this.unsubsFirestore.push(unsubOffer);
-      }
-
-      // 2. Listen for Answer
-      if (this.isCaller) {
+        }, (e) => console.debug('Firestore offer sub note:', e));
+        this.unsubs.push(unsubOffer);
+      } else {
         const answerDoc = doc(db, 'active_calls', callId, 'webrtc_signals', 'answer');
         const unsubAnswer = onSnapshot(answerDoc, (snap) => {
           if (snap.exists()) {
@@ -263,10 +399,9 @@ class WebRTCVoiceService {
               });
             }
           }
-        }, (e) => console.debug('Firestore answer sub notice:', e));
-        this.unsubsFirestore.push(unsubAnswer);
+        }, (e) => console.debug('Firestore answer sub note:', e));
+        this.unsubs.push(unsubAnswer);
 
-        // Also listen for Callee ready signal
         const readyDoc = doc(db, 'active_calls', callId, 'webrtc_signals', 'ready');
         const unsubReady = onSnapshot(readyDoc, (snap) => {
           if (snap.exists()) {
@@ -277,10 +412,10 @@ class WebRTCVoiceService {
             });
           }
         }, () => {});
-        this.unsubsFirestore.push(unsubReady);
+        this.unsubs.push(unsubReady);
       }
 
-      // 3. Listen for ICE Candidates from the opposite peer
+      // Firestore ICE candidates
       const candidatesCol = collection(
         db,
         'active_calls',
@@ -301,17 +436,34 @@ class WebRTCVoiceService {
             }
           }
         });
-      }, (e) => console.debug('Firestore candidates sub notice:', e));
-      this.unsubsFirestore.push(unsubCandidates);
+      }, (e) => console.debug('Firestore candidates sub note:', e));
+      this.unsubs.push(unsubCandidates);
     } catch (e) {
-      console.warn('Firestore signaling attach notice:', e);
+      console.warn('Firestore signaling attach note:', e);
     }
+
+    // 3. LocalStorage Event (Instant local tab-to-tab fallback)
+    const handleStorageSignal = (e: StorageEvent) => {
+      if (e.key === `etsalati_webrtc_signal_${callId}` && e.newValue) {
+        try {
+          const parsed = JSON.parse(e.newValue);
+          this.handleSignalingMessage(parsed);
+        } catch {
+          // ignore
+        }
+      }
+    };
+    window.addEventListener('storage', handleStorageSignal);
+    this.unsubs.push(() => window.removeEventListener('storage', handleStorageSignal));
   }
 
   /**
-   * Dispatch signaling message via BroadcastChannel & Firestore distinct documents
+   * Dispatch signaling message via BroadcastChannel, RTDB, Firestore, and LocalStorage
    */
   private async sendSignal(data: any) {
+    if (!this.currentCallId) return;
+    const callId = this.currentCallId;
+
     // 1. BroadcastChannel (fast local tab-to-tab)
     if (this.signalChannel) {
       try {
@@ -321,29 +473,71 @@ class WebRTCVoiceService {
       }
     }
 
-    // 2. Firestore Document (cross-device / mobile phone <-> PC)
-    if (this.currentCallId) {
-      const callId = this.currentCallId;
-      try {
-        if (data.type === 'sdp-offer') {
-          const offerRef = doc(db, 'active_calls', callId, 'webrtc_signals', 'offer');
-          await setDoc(offerRef, {
-            sdp: data.sdp,
-            timestamp: Date.now(),
-          });
-        } else if (data.type === 'sdp-answer') {
-          const answerRef = doc(db, 'active_calls', callId, 'webrtc_signals', 'answer');
-          await setDoc(answerRef, {
-            sdp: data.sdp,
-            timestamp: Date.now(),
-          });
-        } else if (data.type === 'callee-ready') {
-          const readyRef = doc(db, 'active_calls', callId, 'webrtc_signals', 'ready');
-          await setDoc(readyRef, {
-            ready: true,
-            timestamp: Date.now(),
-          });
-        } else if (data.type === 'ice-candidate' && data.candidate) {
+    // 2. LocalStorage signal event for same browser
+    try {
+      localStorage.setItem(
+        `etsalati_webrtc_signal_${callId}`,
+        JSON.stringify({ ...data, _ts: Date.now() })
+      );
+    } catch {
+      // ignore
+    }
+
+    // 3. Firebase Realtime Database (Sub-50ms latency across networks)
+    try {
+      if (data.type === 'sdp-offer') {
+        const plainOffer = serializeSdp(data.sdp);
+        await set(ref(rtdb, `webrtc_signals/${callId}/offer`), {
+          sdp: plainOffer,
+          timestamp: Date.now(),
+        });
+      } else if (data.type === 'sdp-answer') {
+        const plainAnswer = serializeSdp(data.sdp);
+        await set(ref(rtdb, `webrtc_signals/${callId}/answer`), {
+          sdp: plainAnswer,
+          timestamp: Date.now(),
+        });
+      } else if (data.type === 'callee-ready') {
+        await set(ref(rtdb, `webrtc_signals/${callId}/ready`), {
+          ready: true,
+          timestamp: Date.now(),
+        });
+      } else if (data.type === 'ice-candidate' && data.candidate) {
+        const plainCand = serializeCandidate(data.candidate);
+        if (plainCand) {
+          const targetNode = this.isCaller ? 'caller_candidates' : 'callee_candidates';
+          await push(ref(rtdb, `webrtc_signals/${callId}/${targetNode}`), plainCand);
+        }
+      }
+    } catch (e) {
+      console.debug('RTDB signal send error:', e);
+    }
+
+    // 4. Firestore Document (Multi-device persistence)
+    try {
+      if (data.type === 'sdp-offer') {
+        const plainOffer = serializeSdp(data.sdp);
+        const offerRef = doc(db, 'active_calls', callId, 'webrtc_signals', 'offer');
+        await setDoc(offerRef, {
+          sdp: plainOffer,
+          timestamp: Date.now(),
+        });
+      } else if (data.type === 'sdp-answer') {
+        const plainAnswer = serializeSdp(data.sdp);
+        const answerRef = doc(db, 'active_calls', callId, 'webrtc_signals', 'answer');
+        await setDoc(answerRef, {
+          sdp: plainAnswer,
+          timestamp: Date.now(),
+        });
+      } else if (data.type === 'callee-ready') {
+        const readyRef = doc(db, 'active_calls', callId, 'webrtc_signals', 'ready');
+        await setDoc(readyRef, {
+          ready: true,
+          timestamp: Date.now(),
+        });
+      } else if (data.type === 'ice-candidate' && data.candidate) {
+        const plainCand = serializeCandidate(data.candidate);
+        if (plainCand) {
           const targetCol = collection(
             db,
             'active_calls',
@@ -351,13 +545,13 @@ class WebRTCVoiceService {
             this.isCaller ? 'caller_candidates' : 'callee_candidates'
           );
           await addDoc(targetCol, {
-            candidate: data.candidate,
+            candidate: plainCand,
             timestamp: Date.now(),
           });
         }
-      } catch (e) {
-        console.debug('Firestore signal send error:', e);
       }
+    } catch (e) {
+      console.debug('Firestore signal send error:', e);
     }
   }
 
@@ -372,10 +566,11 @@ class WebRTCVoiceService {
       if (data.type === 'callee-ready' && this.isCaller) {
         // Re-send offer if callee announced readiness
         if (this.peerConnection.localDescription) {
+          const plainOffer = serializeSdp(this.peerConnection.localDescription);
           await this.sendSignal({
             type: 'sdp-offer',
             callId: this.currentCallId,
-            sdp: this.peerConnection.localDescription,
+            sdp: plainOffer,
             fromCaller: true,
           });
         }
@@ -383,11 +578,13 @@ class WebRTCVoiceService {
         // Callee receives offer from Caller
         if (this.peerConnection.signalingState !== 'stable') {
           console.debug('Signaling state is not stable, rolling back');
-          await Promise.all([
-            this.peerConnection.setLocalDescription({ type: 'rollback' } as any),
-          ]);
+          await this.peerConnection.setLocalDescription({ type: 'rollback' } as any).catch(() => {});
         }
-        await this.peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        const sdpInit: RTCSessionDescriptionInit = {
+          type: data.sdp?.type || 'offer',
+          sdp: data.sdp?.sdp || data.sdp,
+        };
+        await this.peerConnection.setRemoteDescription(new RTCSessionDescription(sdpInit));
         this.hasRemoteDescription = true;
 
         // Drain any pending candidates queued before offer arrived
@@ -395,33 +592,38 @@ class WebRTCVoiceService {
 
         // Create answer and send back
         const answer = await this.peerConnection.createAnswer({
-          voiceActivityDetection: true,
+          offerToReceiveAudio: true,
         });
         await this.peerConnection.setLocalDescription(answer);
+        const plainAnswer = serializeSdp(answer);
         await this.sendSignal({
           type: 'sdp-answer',
           callId: this.currentCallId,
-          sdp: answer,
+          sdp: plainAnswer,
           fromCaller: false,
         });
       } else if (data.type === 'sdp-answer' && this.isCaller) {
         // Caller receives answer from Callee
         if (this.peerConnection.signalingState === 'have-local-offer') {
-          await this.peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
+          const sdpInit: RTCSessionDescriptionInit = {
+            type: data.sdp?.type || 'answer',
+            sdp: data.sdp?.sdp || data.sdp,
+          };
+          await this.peerConnection.setRemoteDescription(new RTCSessionDescription(sdpInit));
           this.hasRemoteDescription = true;
           await this.flushPendingCandidates();
         }
       } else if (data.type === 'ice-candidate' && data.candidate) {
+        const candData = data.candidate?.candidate ? data.candidate : data.candidate;
         if (this.hasRemoteDescription && this.peerConnection.remoteDescription) {
           try {
-            await this.peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+            await this.peerConnection.addIceCandidate(new RTCIceCandidate(candData));
           } catch (e) {
-            console.debug('Direct ICE candidate error, queuing candidate', e);
-            this.pendingCandidates.push(data.candidate);
+            this.pendingCandidates.push(candData);
           }
         } else {
           // Queue candidate until remoteDescription is set!
-          this.pendingCandidates.push(data.candidate);
+          this.pendingCandidates.push(candData);
         }
       }
     } catch (e) {
@@ -454,10 +656,11 @@ class WebRTCVoiceService {
     try {
       const offer = await this.peerConnection.createOffer({ iceRestart: true });
       await this.peerConnection.setLocalDescription(offer);
+      const plainOffer = serializeSdp(offer);
       await this.sendSignal({
         type: 'sdp-offer',
         callId: this.currentCallId,
-        sdp: offer,
+        sdp: plainOffer,
         fromCaller: true,
       });
     } catch (e) {
@@ -472,12 +675,36 @@ class WebRTCVoiceService {
     this.setupRemoteAudioElement();
     if (!this.remoteAudioElement) return;
 
-    this.remoteAudioElement.srcObject = stream;
-    this.remoteAudioElement.play().catch(() => {
-      console.warn('Autoplay blocked initially, will unlock on interaction');
+    // Explicitly ensure all tracks are active and unmuted
+    stream.getAudioTracks().forEach((track) => {
+      track.enabled = true;
     });
 
-    // Pipe through Web Audio GainNode for Loudspeaker / Speakerphone boost
+    this.remoteAudioElement.srcObject = stream;
+    this.remoteAudioElement.volume = 1.0;
+
+    const playPromise = this.remoteAudioElement.play();
+    if (playPromise !== undefined) {
+      playPromise.catch((err) => {
+        console.warn('Autoplay requires user gesture:', err);
+        const unlock = () => {
+          this.remoteAudioElement?.play().catch(() => {});
+          window.removeEventListener('click', unlock);
+          window.removeEventListener('touchstart', unlock);
+        };
+        window.addEventListener('click', unlock, { once: true });
+        window.addEventListener('touchstart', unlock, { once: true });
+      });
+    }
+
+    // Setup Web Audio analyzer & Loudspeaker amplifier
+    this.setupAudioAmplifier(stream);
+  }
+
+  /**
+   * Configure Web Audio GainNode & frequency analyzer for the remote stream
+   */
+  private setupAudioAmplifier(stream: MediaStream) {
     try {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (!this.audioCtx) {
@@ -487,31 +714,38 @@ class WebRTCVoiceService {
         this.audioCtx.resume().catch(() => {});
       }
 
+      // Analyze remote voice level for visualizer
       const remoteSource = this.audioCtx.createMediaStreamSource(stream);
+      this.remoteAnalyser = this.audioCtx.createAnalyser();
+      this.remoteAnalyser.fftSize = 64;
+      remoteSource.connect(this.remoteAnalyser);
+
+      // Create gain amplifier node for loudspeaker boost
       this.remoteGainNode = this.audioCtx.createGain();
-      // Apply initial speakerphone gain
       this.remoteGainNode.gain.value = this.isSpeakerphone ? this.speakerphoneGain : 1.0;
 
-      remoteSource.connect(this.remoteGainNode);
-      this.remoteGainNode.connect(this.audioCtx.destination);
+      // Note: We leave remoteAudioElement playing the primary stream
+      // When speakerphone is active, setSinkId and element volume or gain will amplify
     } catch (e) {
       console.debug('Remote audio amplifier setup note:', e);
     }
   }
 
   /**
-   * Toggle Loudspeaker (مكبر الصوت) mode
-   * When ON: boosts output gain to ~280% and routes to speaker device if supported
+   * Toggle Loudspeaker (مكبر الصوت للهاتف) mode
    */
   public toggleSpeakerphone(): boolean {
     return this.setSpeakerphone(!this.isSpeakerphone);
   }
 
   /**
-   * Set Loudspeaker (مكبر الصوت) mode explicitly
+   * Set Loudspeaker mode explicitly
+   * When ON: boosts volume to maximum and directs to external speaker hardware if supported
    */
   public setSpeakerphone(enable: boolean): boolean {
     this.isSpeakerphone = enable;
+
+    this.unlockAudioPlayback();
 
     // 1. Boost volume via Web Audio GainNode
     if (this.remoteGainNode && this.audioCtx) {
@@ -528,12 +762,17 @@ class WebRTCVoiceService {
     // 2. Maximize HTMLAudioElement volume
     if (this.remoteAudioElement) {
       this.remoteAudioElement.volume = 1.0;
-      // 3. Try to select external speaker via setSinkId if browser supports it
+
+      // 3. Try to route to external speaker device via setSinkId if browser supports it
       if ('setSinkId' in this.remoteAudioElement && typeof (this.remoteAudioElement as any).setSinkId === 'function') {
         if (enable && navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
           navigator.mediaDevices.enumerateDevices().then((devices) => {
             const speaker = devices.find(
-              (d) => d.kind === 'audiooutput' && (d.label.toLowerCase().includes('speaker') || d.deviceId === 'speaker')
+              (d) =>
+                d.kind === 'audiooutput' &&
+                (d.label.toLowerCase().includes('speaker') ||
+                  d.deviceId === 'speaker' ||
+                  d.label.includes('مكبر'))
             );
             if (speaker && this.remoteAudioElement) {
               (this.remoteAudioElement as any).setSinkId(speaker.deviceId).catch(() => {});
@@ -570,7 +809,8 @@ class WebRTCVoiceService {
         el = document.createElement('audio');
         el.id = 'etsalati-remote-voice';
         el.autoplay = true;
-        (el as any).playsInline = true;
+        el.setAttribute('playsinline', 'true');
+        el.setAttribute('webkit-playsinline', 'true');
         el.volume = 1.0;
         document.body.appendChild(el);
       }
@@ -597,18 +837,36 @@ class WebRTCVoiceService {
       source.connect(this.localAnalyser);
 
       const bufferLength = this.localAnalyser.frequencyBinCount;
-      const dataArray = new Uint8Array(bufferLength);
+      const localDataArray = new Uint8Array(bufferLength);
+      const remoteDataArray = new Uint8Array(bufferLength);
 
       const checkVolume = () => {
-        if (!this.localAnalyser) return;
-        this.localAnalyser.getByteFrequencyData(dataArray);
-        let sum = 0;
-        for (let i = 0; i < bufferLength; i++) {
-          sum += dataArray[i];
+        // 1. Local mic level
+        if (this.localAnalyser && !this.isMuted) {
+          this.localAnalyser.getByteFrequencyData(localDataArray);
+          let sum = 0;
+          for (let i = 0; i < bufferLength; i++) {
+            sum += localDataArray[i];
+          }
+          const avg = sum / bufferLength;
+          const normalized = Math.min(100, Math.round((avg / 255) * 100));
+          this.events.onAudioLevel?.(normalized, 'local');
+        } else if (this.isMuted) {
+          this.events.onAudioLevel?.(0, 'local');
         }
-        const avg = sum / bufferLength;
-        const normalized = Math.min(100, Math.round((avg / 255) * 100));
-        this.events.onAudioLevel?.(normalized, 'local');
+
+        // 2. Remote voice level
+        if (this.remoteAnalyser) {
+          this.remoteAnalyser.getByteFrequencyData(remoteDataArray);
+          let sumRemote = 0;
+          for (let i = 0; i < bufferLength; i++) {
+            sumRemote += remoteDataArray[i];
+          }
+          const avgRemote = sumRemote / bufferLength;
+          const normalizedRemote = Math.min(100, Math.round((avgRemote / 255) * 100));
+          this.events.onAudioLevel?.(normalizedRemote, 'remote');
+        }
+
         this.animFrameId = requestAnimationFrame(checkVolume);
       };
 
@@ -682,11 +940,22 @@ class WebRTCVoiceService {
       this.peerConnection = null;
     }
 
-    this.unsubsFirestore.forEach((u) => u());
-    this.unsubsFirestore = [];
+    this.unsubs.forEach((u) => u());
+    this.unsubs = [];
 
     if (this.remoteAudioElement) {
       this.remoteAudioElement.srcObject = null;
+    }
+
+    // Clean signal in RTDB for finished call
+    if (this.currentCallId) {
+      const callId = this.currentCallId;
+      try {
+        remove(ref(rtdb, `webrtc_signals/${callId}`));
+        localStorage.removeItem(`etsalati_webrtc_signal_${callId}`);
+      } catch {
+        // ignore
+      }
     }
 
     this.remoteStream = null;

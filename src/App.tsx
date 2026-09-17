@@ -548,6 +548,7 @@ export default function App() {
 
   const handleMakeCall = (number: string, name?: string) => {
     if (!currentUser) return;
+    webrtcVoice.unlockAudioPlayback();
     const cleanNum = number.trim();
     const cleanDigits = cleanExt(cleanNum);
 
@@ -649,6 +650,7 @@ export default function App() {
   };
 
   const handleAnswerIncomingCall = (call: Call) => {
+    webrtcVoice.unlockAudioPlayback();
     stopIncomingRing();
     stopRingback();
     playTelephonyFx('connected');

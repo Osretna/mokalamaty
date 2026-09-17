@@ -163,6 +163,7 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
   };
 
   const handleToggleSpeakerphone = () => {
+    webrtcVoice.unlockAudioPlayback();
     const next = webrtcVoice.toggleSpeakerphone();
     setIsSpeakerphone(next);
   };
@@ -348,7 +349,10 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
                   <span>رفض المكالمة</span>
                 </button>
                 <button
-                  onClick={onAnswerIncoming}
+                  onClick={() => {
+                    webrtcVoice.unlockAudioPlayback();
+                    onAnswerIncoming();
+                  }}
                   className="flex-1 md:flex-none px-8 py-3.5 rounded-2xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-sm flex items-center justify-center gap-2 shadow-xl shadow-emerald-500/40 transition-all active:scale-95 cursor-pointer"
                 >
                   <PhoneCall className="w-5 h-5 animate-pulse" />

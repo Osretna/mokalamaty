@@ -59,6 +59,7 @@ export const ActiveCallHUD: React.FC<ActiveCallHUDProps> = ({
   };
 
   const handleToggleSpeakerphone = () => {
+    webrtcVoice.unlockAudioPlayback();
     const next = webrtcVoice.toggleSpeakerphone();
     setIsSpeakerphone(next);
   };
