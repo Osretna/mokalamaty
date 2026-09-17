@@ -130,7 +130,12 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
             } else if (st === 'failed') {
               setVoiceStatus('failed');
               setVoiceNotice('يرجى السماح بصلاحية المايكروفون في المتصفح للتحدث بالصوت');
+            } else if (st === 'ended') {
+              onHangupCall(currentCall.id);
             }
+          },
+          onRemoteHangup: () => {
+            onHangupCall(currentCall.id);
           },
           onError: (err) => {
             setVoiceNotice(err);
@@ -212,6 +217,35 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
     onMakeCall(cleanNum, target ? target.name : undefined);
     setDialNumber('');
   };
+
+  // Keyboard dialing: Enter key triggers call, typing digits updates dial number
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (currentCall) return; // ignore during active call
+      const target = e.target as HTMLElement;
+      if (target && target.tagName === 'INPUT' && target.id !== 'agent-dial-input') {
+        return;
+      }
+      if (target && (target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        return;
+      }
+
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        handleCall();
+      } else if (target?.id !== 'agent-dial-input') {
+        if ((e.key >= '0' && e.key <= '9') || e.key === '*' || e.key === '#' || e.key === '+') {
+          playDTMF(e.key);
+          setDialNumber((prev) => prev + e.key);
+        } else if (e.key === 'Backspace') {
+          setDialNumber((prev) => prev.slice(0, -1));
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [dialNumber, users, currentCall]);
 
   const handleRedial = () => {
     if (lastDialed) {
@@ -386,14 +420,22 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
               {/* Dial Input Field */}
               <div className="relative mb-3">
                 <input
+                  id="agent-dial-input"
                   type="text"
                   value={dialNumber}
                   onChange={(e) => setDialNumber(e.target.value)}
-                  placeholder="أدخل التحويلة أو الرقم المطلوب..."
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleCall();
+                    }
+                  }}
+                  placeholder="أدخل التحويلة أو الرقم المطلوب (أو اضغط Enter)..."
                   className="w-full bg-slate-800/90 border border-slate-700 rounded-2xl px-4 py-3.5 text-center text-xl font-mono font-bold text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/30 transition-all tracking-wider"
                 />
                 {dialNumber && (
                   <button
+                    type="button"
                     onClick={() => setDialNumber((prev) => prev.slice(0, -1))}
                     className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white px-2 py-1 text-xs font-bold cursor-pointer"
                   >

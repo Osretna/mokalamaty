@@ -31,6 +31,7 @@ export interface VoiceCallEvents {
   onStatusChange?: (status: 'connecting' | 'connected' | 'failed' | 'ended') => void;
   onError?: (err: string) => void;
   onSpeakerphoneChange?: (enabled: boolean) => void;
+  onRemoteHangup?: () => void;
 }
 
 // Enterprise STUN servers for robust NAT traversal across mobile carriers & home Wi-Fi
@@ -58,12 +59,46 @@ function serializeSdp(desc: any) {
 
 function serializeCandidate(cand: any) {
   if (!cand) return null;
-  return {
-    candidate: cand.candidate || '',
-    sdpMid: cand.sdpMid !== undefined ? cand.sdpMid : null,
-    sdpMLineIndex: cand.sdpMLineIndex !== undefined ? cand.sdpMLineIndex : null,
-    usernameFragment: cand.usernameFragment !== undefined ? cand.usernameFragment : null,
+  const rawCandidate = typeof cand === 'string' ? cand : (cand.candidate || '');
+  if (!rawCandidate || typeof rawCandidate !== 'string' || !rawCandidate.trim()) return null;
+  const res: any = {
+    candidate: rawCandidate.trim(),
   };
+  if (cand.sdpMid !== undefined && cand.sdpMid !== null) {
+    res.sdpMid = String(cand.sdpMid);
+  }
+  if (cand.sdpMLineIndex !== undefined && cand.sdpMLineIndex !== null && !isNaN(Number(cand.sdpMLineIndex))) {
+    res.sdpMLineIndex = Number(cand.sdpMLineIndex);
+  }
+  if (typeof cand.usernameFragment === 'string' && cand.usernameFragment.trim()) {
+    res.usernameFragment = cand.usernameFragment.trim();
+  }
+  return res;
+}
+
+function sanitizeCandidateInit(cand: any): RTCIceCandidateInit | null {
+  if (!cand) return null;
+  const rawCandidate =
+    typeof cand === 'string'
+      ? cand
+      : typeof cand.candidate === 'string'
+      ? cand.candidate
+      : (cand.candidate?.candidate || '');
+  if (!rawCandidate || typeof rawCandidate !== 'string' || !rawCandidate.trim()) return null;
+
+  const init: RTCIceCandidateInit = {
+    candidate: rawCandidate.trim(),
+  };
+  if (cand.sdpMid !== undefined && cand.sdpMid !== null && cand.sdpMid !== '') {
+    init.sdpMid = String(cand.sdpMid);
+  }
+  if (cand.sdpMLineIndex !== undefined && cand.sdpMLineIndex !== null && !isNaN(Number(cand.sdpMLineIndex))) {
+    init.sdpMLineIndex = Number(cand.sdpMLineIndex);
+  }
+  if (typeof cand.usernameFragment === 'string' && cand.usernameFragment.trim()) {
+    init.usernameFragment = cand.usernameFragment.trim();
+  }
+  return init;
 }
 
 class WebRTCVoiceService {
@@ -76,7 +111,7 @@ class WebRTCVoiceService {
   private isCaller: boolean = false;
   private isMuted: boolean = false;
   private isSpeakerphone: boolean = false;
-  private speakerphoneGain: number = 2.8; // 280% volume boost for mobile phone loudspeaker
+  private speakerphoneGain: number = 3.2; // 320% volume boost for loudspeaker
   private events: VoiceCallEvents = {};
 
   // Web Audio pipeline for voice visualizers and loud speakerphone gain
@@ -84,11 +119,13 @@ class WebRTCVoiceService {
   private localAnalyser: AnalyserNode | null = null;
   private remoteAnalyser: AnalyserNode | null = null;
   private remoteGainNode: GainNode | null = null;
+  private remoteMediaSource: MediaStreamAudioSourceNode | null = null;
   private animFrameId: number | null = null;
 
   // Cleanup unsubscribers
   private unsubs: (() => void)[] = [];
-  private pendingCandidates: any[] = [];
+  private pendingCandidates: RTCIceCandidateInit[] = [];
+  private processedCandidateKeys: Set<string> = new Set();
   private hasRemoteDescription: boolean = false;
   private audioUnlocked: boolean = false;
 
@@ -123,12 +160,33 @@ class WebRTCVoiceService {
    */
   public unlockAudioPlayback() {
     try {
+      this.setupRemoteAudioElement();
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!this.audioCtx && AudioCtx) {
+        this.audioCtx = new AudioCtx();
+      }
       if (this.audioCtx && this.audioCtx.state === 'suspended') {
         this.audioCtx.resume().catch(() => {});
       }
       if (this.remoteAudioElement) {
-        if (this.remoteAudioElement.paused && this.remoteStream) {
+        this.remoteAudioElement.volume = 1.0;
+        this.remoteAudioElement.muted = false;
+        if (this.remoteStream) {
           this.remoteAudioElement.play().catch(() => {});
+        } else if (!this.audioUnlocked) {
+          // Play silent tick to authorize the HTML5 audio element for future play() calls without user gesture
+          this.remoteAudioElement.src =
+            'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+          this.remoteAudioElement
+            .play()
+            .then(() => {
+              this.audioUnlocked = true;
+              if (this.remoteAudioElement && !this.remoteStream) {
+                this.remoteAudioElement.pause();
+                this.remoteAudioElement.removeAttribute('src');
+              }
+            })
+            .catch(() => {});
         }
       }
       this.audioUnlocked = true;
@@ -350,7 +408,7 @@ class WebRTCVoiceService {
           const list = snap.val();
           if (list && typeof list === 'object') {
             Object.values(list).forEach((cand: any) => {
-              if (cand && cand.candidate) {
+              if (cand) {
                 this.handleSignalingMessage({
                   type: 'ice-candidate',
                   callId,
@@ -363,6 +421,19 @@ class WebRTCVoiceService {
         }
       });
       this.unsubs.push(() => unsubRtdbCandidates());
+
+      // Listen for call ended signal via RTDB
+      const rtdbEndedRef = ref(rtdb, `webrtc_signals/${callId}/ended`);
+      const unsubRtdbEnded = onValue(rtdbEndedRef, (snap) => {
+        if (snap.exists() && snap.val()?.ended) {
+          this.handleSignalingMessage({
+            type: 'call-ended',
+            callId,
+            fromCaller: !this.isCaller,
+          });
+        }
+      });
+      this.unsubs.push(() => unsubRtdbEnded());
     } catch (e) {
       console.warn('RTDB signaling listener note:', e);
     }
@@ -438,6 +509,19 @@ class WebRTCVoiceService {
         });
       }, (e) => console.debug('Firestore candidates sub note:', e));
       this.unsubs.push(unsubCandidates);
+
+      // Firestore call ended listener
+      const endedDoc = doc(db, 'active_calls', callId, 'webrtc_signals', 'ended');
+      const unsubEnded = onSnapshot(endedDoc, (snap) => {
+        if (snap.exists() && snap.data()?.ended) {
+          this.handleSignalingMessage({
+            type: 'call-ended',
+            callId,
+            fromCaller: !this.isCaller,
+          });
+        }
+      }, () => {});
+      this.unsubs.push(unsubEnded);
     } catch (e) {
       console.warn('Firestore signaling attach note:', e);
     }
@@ -508,6 +592,11 @@ class WebRTCVoiceService {
           const targetNode = this.isCaller ? 'caller_candidates' : 'callee_candidates';
           await push(ref(rtdb, `webrtc_signals/${callId}/${targetNode}`), plainCand);
         }
+      } else if (data.type === 'call-ended') {
+        await set(ref(rtdb, `webrtc_signals/${callId}/ended`), {
+          ended: true,
+          timestamp: Date.now(),
+        });
       }
     } catch (e) {
       console.debug('RTDB signal send error:', e);
@@ -549,6 +638,12 @@ class WebRTCVoiceService {
             timestamp: Date.now(),
           });
         }
+      } else if (data.type === 'call-ended') {
+        const endedRef = doc(db, 'active_calls', callId, 'webrtc_signals', 'ended');
+        await setDoc(endedRef, {
+          ended: true,
+          timestamp: Date.now(),
+        });
       }
     } catch (e) {
       console.debug('Firestore signal send error:', e);
@@ -563,7 +658,13 @@ class WebRTCVoiceService {
     if (data.fromCaller === this.isCaller) return; // ignore own signals
 
     try {
-      if (data.type === 'callee-ready' && this.isCaller) {
+      if (data.type === 'call-ended') {
+        console.log('📞 [WebRTC] Remote peer ended call:', data.callId);
+        this.events.onRemoteHangup?.();
+        this.events.onStatusChange?.('ended');
+        this.cleanupSession(true);
+        return;
+      } else if (data.type === 'callee-ready' && this.isCaller) {
         // Re-send offer if callee announced readiness
         if (this.peerConnection.localDescription) {
           const plainOffer = serializeSdp(this.peerConnection.localDescription);
@@ -614,16 +715,22 @@ class WebRTCVoiceService {
           await this.flushPendingCandidates();
         }
       } else if (data.type === 'ice-candidate' && data.candidate) {
-        const candData = data.candidate?.candidate ? data.candidate : data.candidate;
-        if (this.hasRemoteDescription && this.peerConnection.remoteDescription) {
-          try {
-            await this.peerConnection.addIceCandidate(new RTCIceCandidate(candData));
-          } catch (e) {
-            this.pendingCandidates.push(candData);
+        const sanitized = sanitizeCandidateInit(data.candidate);
+        if (sanitized) {
+          const key = `${sanitized.candidate}|${sanitized.sdpMid || ''}|${sanitized.sdpMLineIndex ?? ''}`;
+          if (!this.processedCandidateKeys.has(key)) {
+            this.processedCandidateKeys.add(key);
+            if (this.hasRemoteDescription && this.peerConnection.remoteDescription) {
+              try {
+                await this.peerConnection.addIceCandidate(new RTCIceCandidate(sanitized));
+              } catch (e) {
+                console.debug('Queueing candidate after failed direct add:', e);
+                this.pendingCandidates.push(sanitized);
+              }
+            } else {
+              this.pendingCandidates.push(sanitized);
+            }
           }
-        } else {
-          // Queue candidate until remoteDescription is set!
-          this.pendingCandidates.push(candData);
         }
       }
     } catch (e) {
@@ -641,7 +748,10 @@ class WebRTCVoiceService {
 
     for (const cand of list) {
       try {
-        await this.peerConnection.addIceCandidate(new RTCIceCandidate(cand));
+        const sanitized = sanitizeCandidateInit(cand);
+        if (sanitized) {
+          await this.peerConnection.addIceCandidate(new RTCIceCandidate(sanitized));
+        }
       } catch (e) {
         console.debug('Error flushing ICE candidate:', e);
       }
@@ -972,7 +1082,24 @@ class WebRTCVoiceService {
   /**
    * End voice session and cleanup audio tracks
    */
-  public endVoiceSession() {
+  public endVoiceSession(explicitCallId?: string) {
+    const targetCallId = explicitCallId || this.currentCallId;
+    if (targetCallId) {
+      try {
+        this.sendSignal({
+          type: 'call-ended',
+          callId: targetCallId,
+          fromCaller: this.isCaller,
+        });
+      } catch {}
+      try {
+        set(ref(rtdb, `webrtc_signals/${targetCallId}/ended`), {
+          ended: true,
+          by: this.isCaller ? 'caller' : 'callee',
+          timestamp: Date.now(),
+        }).catch(() => {});
+      } catch {}
+    }
     this.cleanupSession(true);
   }
 }

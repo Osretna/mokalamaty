@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Phone, 
   PhoneIncoming, 
@@ -85,6 +85,34 @@ export const CallManagerView: React.FC<CallManagerViewProps> = ({
     onMakeCall(cleanNum, destName);
     setDialNumber('');
   };
+
+  // Keyboard support: Enter key initiates the call, typing digits updates number
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (target && target.tagName === 'INPUT' && target.id !== 'call-manager-dial-input') {
+        return;
+      }
+      if (target && (target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        return;
+      }
+
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        handleCall();
+      } else if (target?.id !== 'call-manager-dial-input') {
+        if ((e.key >= '0' && e.key <= '9') || e.key === '*' || e.key === '#' || e.key === '+') {
+          playDTMF(e.key);
+          setDialNumber((prev) => prev + e.key);
+        } else if (e.key === 'Backspace') {
+          setDialNumber((prev) => prev.slice(0, -1));
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [dialNumber, users]);
 
   const formatDuration = (sec: number) => {
     const m = Math.floor(sec / 60);
@@ -247,17 +275,26 @@ export const CallManagerView: React.FC<CallManagerViewProps> = ({
             {/* Display */}
             <div className="relative mb-4">
               <input
+                id="call-manager-dial-input"
                 type="text"
-                readOnly
                 dir="ltr"
                 value={dialNumber}
-                placeholder="أدخل الرقم المطلوب..."
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-center text-xl font-mono font-bold text-cyan-300 tracking-wider placeholder:text-slate-600 focus:outline-none"
+                onChange={(e) => setDialNumber(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleCall();
+                  }
+                }}
+                placeholder="أدخل الرقم المطلوب (أو اضغط Enter)..."
+                className="w-full bg-slate-950 border border-slate-800 focus:border-cyan-500/60 focus:ring-1 focus:ring-cyan-500/30 rounded-xl px-4 py-3 text-center text-xl font-mono font-bold text-cyan-300 tracking-wider placeholder:text-slate-600 focus:outline-none transition-all"
               />
               {dialNumber && (
                 <button
+                  type="button"
                   onClick={() => setDialNumber((prev) => prev.slice(0, -1))}
-                  className="absolute right-3 top-3 p-1 text-slate-400 hover:text-rose-400 transition-colors"
+                  className="absolute right-3 top-3 p-1 text-slate-400 hover:text-rose-400 transition-colors cursor-pointer"
+                  title="مسح"
                 >
                   <Delete className="w-4 h-4" />
                 </button>

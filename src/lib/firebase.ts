@@ -330,6 +330,14 @@ export function sendUserPresenceHeartbeat(user: PBXUser) {
 
   // 1. Update localStorage presence map (reliable across same-browser tabs)
   try {
+    let deletedIds: string[] = [];
+    try {
+      deletedIds = JSON.parse(localStorage.getItem('etsalati_deleted_users') || '[]');
+    } catch {}
+    if (deletedIds.includes(user.id) || deletedIds.includes(user.extension)) {
+      return;
+    }
+
     const raw = localStorage.getItem('etsalati_presence_map');
     const map: Record<string, typeof presenceData> = raw ? JSON.parse(raw) : {};
     map[user.extension] = presenceData;
@@ -368,11 +376,30 @@ export function sendUserPresenceHeartbeat(user: PBXUser) {
 export function subscribeOnlinePresence(
   onUpdate: (onlineMap: Record<string, { lastSeen: number; name: string; extension: string }>) => void
 ): () => void {
+  const getDeletedFilter = (): string[] => {
+    try {
+      return JSON.parse(localStorage.getItem('etsalati_deleted_users') || '[]');
+    } catch {
+      return [];
+    }
+  };
+
+  const filterMap = (m: Record<string, { lastSeen: number; name: string; extension: string }>) => {
+    const deleted = getDeletedFilter();
+    const clean: Record<string, { lastSeen: number; name: string; extension: string }> = {};
+    for (const [ext, val] of Object.entries(m)) {
+      if (!deleted.includes(ext) && !deleted.includes((val as any)?.id)) {
+        clean[ext] = val;
+      }
+    }
+    return clean;
+  };
+
   // Read existing from LocalStorage initially
   try {
     const raw = localStorage.getItem('etsalati_presence_map');
     if (raw) {
-      onUpdate(JSON.parse(raw));
+      onUpdate(filterMap(JSON.parse(raw)));
     }
   } catch {
     // ignore
@@ -391,18 +418,18 @@ export function subscribeOnlinePresence(
       if (raw) {
         const local = JSON.parse(raw);
         Object.assign(local, map);
-        onUpdate(local);
+        onUpdate(filterMap(local));
         return;
       }
     } catch {
       // ignore
     }
-    onUpdate(map);
+    onUpdate(filterMap(map));
   }, () => {
     // fallback to local map
     try {
       const raw = localStorage.getItem('etsalati_presence_map');
-      if (raw) onUpdate(JSON.parse(raw));
+      if (raw) onUpdate(filterMap(JSON.parse(raw)));
     } catch {
       // ignore
     }
@@ -411,7 +438,7 @@ export function subscribeOnlinePresence(
   const handleStorage = (e: StorageEvent) => {
     if (e.key === 'etsalati_presence_map' && e.newValue) {
       try {
-        onUpdate(JSON.parse(e.newValue));
+        onUpdate(filterMap(JSON.parse(e.newValue)));
       } catch {
         // ignore
       }
@@ -421,7 +448,7 @@ export function subscribeOnlinePresence(
   const handleCustom = (e: Event) => {
     const custom = e as CustomEvent;
     if (custom.detail) {
-      onUpdate(custom.detail);
+      onUpdate(filterMap(custom.detail));
     }
   };
 
@@ -483,35 +510,189 @@ export async function autoSaveUserToFirebase(user: PBXUser): Promise<boolean> {
  */
 export async function deleteUserFromFirebase(user: PBXUser): Promise<boolean> {
   try {
-    // 1. Delete from Firestore collection "users"
-    const docId = user.id || `usr-${user.extension}`;
-    const userDocRef = doc(db, 'users', docId);
-    await deleteDoc(userDocRef);
+    const ext = String(user.extension).trim();
+    const docId = user.id || `usr-${ext}`;
 
-    // Also delete with extension fallback if doc ID differs
+    // 1. Delete from Firestore collection "users"
     try {
-      const extDocRef = doc(db, 'users', `usr-${user.extension}`);
-      await deleteDoc(extDocRef);
-    } catch {
-      // ignore
+      await deleteDoc(doc(db, 'users', docId));
+    } catch {}
+
+    try {
+      await deleteDoc(doc(db, 'users', `usr-${ext}`));
+    } catch {}
+
+    // 2. Delete presence records in Firestore
+    try {
+      await deleteDoc(doc(db, 'presence', ext));
+    } catch {}
+    try {
+      if (user.id) await deleteDoc(doc(db, 'presence', user.id));
+    } catch {}
+
+    // 3. Add to Firestore collection "deleted_users" so all devices learn of this deletion
+    try {
+      await setDoc(doc(db, 'deleted_users', ext), {
+        id: user.id,
+        extension: ext,
+        name: user.name,
+        deletedAt: Date.now(),
+      });
+      if (user.id && user.id !== ext) {
+        await setDoc(doc(db, 'deleted_users', user.id), {
+          id: user.id,
+          extension: ext,
+          name: user.name,
+          deletedAt: Date.now(),
+        });
+      }
+    } catch (e) {
+      console.warn('Firestore deleted_users recording notice:', e);
     }
 
-    // 2. Remove from Realtime Database
+    // 4. Remove from Realtime Database (users & presence) and record in deleted_users
     try {
-      const rtdbRef = ref(rtdb, `users/${user.extension}`);
-      await remove(rtdbRef);
-      const presenceRef = ref(rtdb, `presence/${user.extension}`);
-      await remove(presenceRef);
+      await remove(ref(rtdb, `users/${ext}`));
+      if (user.id) await remove(ref(rtdb, `users/${user.id}`));
+      await remove(ref(rtdb, `presence/${ext}`));
+      if (user.id) await remove(ref(rtdb, `presence/${user.id}`));
+      await set(ref(rtdb, `deleted_users/${ext}`), {
+        id: user.id,
+        extension: ext,
+        name: user.name,
+        deletedAt: Date.now(),
+      });
     } catch (rtdbErr) {
       console.warn('Realtime Database remove notice:', rtdbErr);
     }
 
-    console.log(`🗑️ [Firebase Sync] User ${user.name} (${user.extension}) deleted from Firestore & RTDB!`);
+    // 5. Update LocalStorage immediately
+    try {
+      const deleted: string[] = JSON.parse(localStorage.getItem('etsalati_deleted_users') || '[]');
+      if (!deleted.includes(ext)) deleted.push(ext);
+      if (user.id && !deleted.includes(user.id)) deleted.push(user.id);
+      localStorage.setItem('etsalati_deleted_users', JSON.stringify(deleted));
+
+      const presRaw = localStorage.getItem('etsalati_presence_map');
+      if (presRaw) {
+        const presMap = JSON.parse(presRaw);
+        delete presMap[ext];
+        if (user.id) delete presMap[user.id];
+        localStorage.setItem('etsalati_presence_map', JSON.stringify(presMap));
+      }
+
+      const usersRaw = localStorage.getItem('etsalati_users');
+      if (usersRaw) {
+        const uList = JSON.parse(usersRaw);
+        if (Array.isArray(uList)) {
+          const filtered = uList.filter((u: PBXUser) => u.id !== user.id && u.extension !== ext);
+          localStorage.setItem('etsalati_users', JSON.stringify(filtered));
+        }
+      }
+    } catch {}
+
+    // 6. Broadcast to all open tabs and windows via callBus and CustomEvent
+    try {
+      callBus?.postMessage({
+        type: 'USER_DELETED',
+        userId: user.id,
+        extension: ext,
+      });
+    } catch {}
+
+    window.dispatchEvent(
+      new CustomEvent('etsalati_user_deleted', {
+        detail: { userId: user.id, extension: ext },
+      })
+    );
+
+    console.log(`🗑️ [Firebase Sync] User ${user.name} (${ext}) completely purged from Firestore, RTDB, and Presence!`);
     return true;
   } catch (error) {
     console.error('❌ Error deleting user from Firebase:', error);
     return false;
   }
+}
+
+/**
+ * Real-time listener for deleted_users collection in Firestore and RTDB
+ */
+export function subscribeDeletedUsers(
+  onDeletedChange: (deletedMap: Record<string, boolean>) => void
+): () => void {
+  let unsubFirestore = () => {};
+  let unsubRtdb = () => {};
+
+  const getLocalMap = (): Record<string, boolean> => {
+    try {
+      const arr: string[] = JSON.parse(localStorage.getItem('etsalati_deleted_users') || '[]');
+      const map: Record<string, boolean> = {};
+      arr.forEach((k) => (map[k] = true));
+      return map;
+    } catch {
+      return {};
+    }
+  };
+
+  try {
+    const deletedCol = collection(db, 'deleted_users');
+    unsubFirestore = onSnapshot(
+      deletedCol,
+      (snapshot) => {
+        const map = getLocalMap();
+        snapshot.forEach((d) => {
+          map[d.id] = true;
+          const data = d.data();
+          if (data?.extension) map[data.extension] = true;
+          if (data?.id) map[data.id] = true;
+        });
+        try {
+          localStorage.setItem('etsalati_deleted_users', JSON.stringify(Object.keys(map)));
+        } catch {}
+        onDeletedChange(map);
+      },
+      (err) => console.warn('Firestore deleted_users snapshot note:', err.message)
+    );
+  } catch (err) {
+    console.warn('Deleted users Firestore listener setup note:', err);
+  }
+
+  try {
+    const rtdbDeletedRef = ref(rtdb, 'deleted_users');
+    unsubRtdb = onValue(rtdbDeletedRef, (snapshot) => {
+      if (snapshot.exists()) {
+        const val = snapshot.val();
+        if (val && typeof val === 'object') {
+          const map = getLocalMap();
+          Object.keys(val).forEach((k) => (map[k] = true));
+          try {
+            localStorage.setItem('etsalati_deleted_users', JSON.stringify(Object.keys(map)));
+          } catch {}
+          onDeletedChange(map);
+        }
+      }
+    });
+  } catch (err) {
+    console.warn('Deleted users RTDB setup note:', err);
+  }
+
+  const handleCustom = (e: Event) => {
+    const detail = (e as CustomEvent).detail;
+    if (detail) {
+      const map = getLocalMap();
+      if (detail.extension) map[detail.extension] = true;
+      if (detail.userId) map[detail.userId] = true;
+      onDeletedChange(map);
+    }
+  };
+
+  window.addEventListener('etsalati_user_deleted', handleCustom);
+
+  return () => {
+    unsubFirestore();
+    unsubRtdb();
+    window.removeEventListener('etsalati_user_deleted', handleCustom);
+  };
 }
 
 /**

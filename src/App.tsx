@@ -53,6 +53,7 @@ import {
   subscribeActiveCalls,
   sendUserPresenceHeartbeat,
   subscribeOnlinePresence,
+  subscribeDeletedUsers,
   callBus,
 } from './lib/firebase';
 import { webrtcVoice } from './utils/webrtcVoiceService';
@@ -113,8 +114,15 @@ export default function App() {
   });
 
   const [users, setUsers] = useState<PBXUser[]>(() => {
+    let deletedIds: string[] = [];
+    try {
+      deletedIds = JSON.parse(localStorage.getItem('etsalati_deleted_users') || '[]');
+    } catch {
+      deletedIds = [];
+    }
     const saved = localStorage.getItem('etsalati_users');
-    return saved ? JSON.parse(saved) : INITIAL_USERS;
+    const baseList: PBXUser[] = saved ? JSON.parse(saved) : INITIAL_USERS;
+    return baseList.filter((u) => !deletedIds.includes(u.id) && !deletedIds.includes(u.extension));
   });
 
   // Online employees presence map
@@ -232,31 +240,46 @@ export default function App() {
     localStorage.setItem('etsalati_users', JSON.stringify(users));
   }, [users]);
 
-  // Real-time Firebase Firestore Users Listener
+  // Real-time Firebase Firestore Users Listener & Deleted Users Synchronization
   useEffect(() => {
     const unsubscribe = subscribeUsersFromFirebase((firebaseUsers) => {
       if (firebaseUsers && firebaseUsers.length > 0) {
-        setUsers((prev) => {
+        setUsers(() => {
           let deletedIds: string[] = [];
           try {
             deletedIds = JSON.parse(localStorage.getItem('etsalati_deleted_users') || '[]');
           } catch {
             deletedIds = [];
           }
-          // Merge Firebase users with current state excluding deleted ones
-          const map = new Map<string, PBXUser>(prev.filter((u) => !deletedIds.includes(u.id) && !deletedIds.includes(u.extension)).map((u) => [u.extension, u]));
-          firebaseUsers.forEach((fbU) => {
-            if (!deletedIds.includes(fbU.id) && !deletedIds.includes(fbU.extension)) {
-              map.set(fbU.extension, fbU);
-            }
-          });
-          return Array.from(map.values()).filter((u: PBXUser) => !deletedIds.includes(u.id) && !deletedIds.includes(u.extension));
+          // The Firebase collection is authoritative: do NOT keep old removed users from local prev
+          return firebaseUsers.filter(
+            (u) => !deletedIds.includes(u.id) && !deletedIds.includes(u.extension)
+          );
         });
+      }
+    });
+
+    const unsubDeleted = subscribeDeletedUsers((deletedMap) => {
+      setUsers((prev) => prev.filter((u) => !deletedMap[u.id] && !deletedMap[u.extension]));
+      setOnlineUsers((prev) => {
+        const next = { ...prev };
+        for (const k in deletedMap) {
+          delete next[k];
+        }
+        return next;
+      });
+      if (
+        currentUserRef.current &&
+        (deletedMap[currentUserRef.current.id] || deletedMap[currentUserRef.current.extension])
+      ) {
+        setCurrentUser(null);
+        sessionStorage.removeItem('etsalati_session_user');
       }
     });
 
     return () => {
       if (typeof unsubscribe === 'function') unsubscribe();
+      if (typeof unsubDeleted === 'function') unsubDeleted();
     };
   }, []);
 
@@ -454,6 +477,8 @@ export default function App() {
         } else if (updates.status === 'ended' || updates.status === 'missed') {
           stopRingback();
           stopIncomingRing();
+          stopHoldMusic();
+          webrtcVoice.endVoiceSession(callId);
           playTelephonyFx('hangup');
           setIncomingCall(null);
         }
@@ -467,6 +492,23 @@ export default function App() {
         if (incomingCallRef.current && incomingCallRef.current.id === data.callId) {
           stopIncomingRing();
           setIncomingCall(null);
+        }
+        webrtcVoice.endVoiceSession(data.callId);
+      } else if (data.type === 'USER_DELETED') {
+        const { userId, extension } = data;
+        setUsers((prev) => prev.filter((u) => u.id !== userId && u.extension !== extension));
+        setOnlineUsers((prev) => {
+          const next = { ...prev };
+          if (extension) delete next[extension];
+          if (userId) delete next[userId];
+          return next;
+        });
+        if (
+          currentUserRef.current &&
+          (currentUserRef.current.id === userId || currentUserRef.current.extension === extension)
+        ) {
+          setCurrentUser(null);
+          sessionStorage.removeItem('etsalati_session_user');
         }
       }
     };
@@ -791,7 +833,16 @@ export default function App() {
         const callerExt = cleanExt(myActiveCall.callerExtension || myActiveCall.extension);
         const isCaller = callerExt === myExtNorm;
         webrtcVoice
-          .startVoiceSession(myActiveCall.id, isCaller)
+          .startVoiceSession(myActiveCall.id, isCaller, {
+            onRemoteHangup: () => {
+              handleHangup(myActiveCall.id);
+            },
+            onStatusChange: (st) => {
+              if (st === 'ended') {
+                handleHangup(myActiveCall.id);
+              }
+            },
+          })
           .catch((e) => console.debug('Admin WebRTC voice session note:', e));
       } else if (!myActiveCall || myActiveCall.status === 'ended') {
         webrtcVoice.endVoiceSession();
