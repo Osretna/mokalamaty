@@ -20,21 +20,28 @@ import {
   Smartphone,
   Download,
   Share2,
-  Headphones
+  Headphones,
+  Pencil,
+  Trash2,
+  AlertTriangle,
+  Save,
+  Loader2,
 } from 'lucide-react';
 import { PBXUser } from '../../types';
-import { autoSaveUserToFirebase } from '../../lib/firebase';
+import { autoSaveUserToFirebase, deleteUserFromFirebase } from '../../lib/firebase';
 
 interface UsersExtensionsViewProps {
   users: PBXUser[];
   currentUser: PBXUser;
   onUpdateUsers: (newUsers: PBXUser[]) => void;
+  onUpdateCurrentUser?: (user: PBXUser | null) => void;
 }
 
 export const UsersExtensionsView: React.FC<UsersExtensionsViewProps> = ({
   users,
   currentUser,
   onUpdateUsers,
+  onUpdateCurrentUser,
 }) => {
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -51,6 +58,128 @@ export const UsersExtensionsView: React.FC<UsersExtensionsViewProps> = ({
   const [protocol, setProtocol] = useState<'SIP' | 'IAX2' | 'PJSIP'>('SIP');
   const [role, setRole] = useState<'admin' | 'supervisor' | 'agent'>('agent');
   const [sipServer, setSipServer] = useState('192.168.1.100');
+
+  // Edit User State
+  const [editingUser, setEditingUser] = useState<PBXUser | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editUsername, setEditUsername] = useState('');
+  const [editPassword, setEditPassword] = useState('');
+  const [editExtension, setEditExtension] = useState('');
+  const [editEmail, setEditEmail] = useState('');
+  const [editProtocol, setEditProtocol] = useState<'SIP' | 'IAX2' | 'PJSIP'>('SIP');
+  const [editRole, setEditRole] = useState<'admin' | 'supervisor' | 'agent'>('agent');
+  const [editStatus, setEditStatus] = useState<PBXUser['status']>('online');
+  const [editSipServer, setEditSipServer] = useState('192.168.1.100');
+  const [editVoicemailEnabled, setEditVoicemailEnabled] = useState(true);
+  const [editRecordingEnabled, setEditRecordingEnabled] = useState(true);
+  const [editShowPassword, setEditShowPassword] = useState(false);
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+
+  // Delete User State
+  const [deletingUser, setDeletingUser] = useState<PBXUser | null>(null);
+  const [isDeletingLoading, setIsDeletingLoading] = useState(false);
+
+  const handleOpenEditModal = (user: PBXUser) => {
+    setEditingUser(user);
+    setEditName(user.name);
+    setEditUsername(user.username || user.extension);
+    setEditPassword(user.password || user.secret || '');
+    setEditExtension(user.extension);
+    setEditEmail(user.email || '');
+    setEditProtocol(user.protocol || 'SIP');
+    setEditRole(user.role);
+    setEditStatus(user.status);
+    setEditSipServer(user.sipServer || '192.168.1.100');
+    setEditVoicemailEnabled(user.voicemailEnabled ?? true);
+    setEditRecordingEnabled(user.recordingEnabled ?? true);
+    setEditShowPassword(false);
+  };
+
+  const handleSaveEditedUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingUser || !editName.trim() || !editExtension.trim()) return;
+
+    setIsSavingEdit(true);
+    const finalUsername = editUsername.trim() || `agent${editExtension.trim()}`;
+    const finalPassword = editPassword.trim() || editingUser.password || `pass${editExtension.trim()}`;
+
+    const updatedUser: PBXUser = {
+      ...editingUser,
+      name: editName.trim(),
+      username: finalUsername,
+      password: finalPassword,
+      secret: finalPassword,
+      extension: editExtension.trim(),
+      email: editEmail.trim() || `${finalUsername}@etsalati.local`,
+      protocol: editProtocol,
+      role: editRole,
+      status: editStatus,
+      sipServer: editSipServer.trim() || '192.168.1.100',
+      voicemailEnabled: editVoicemailEnabled,
+      recordingEnabled: editRecordingEnabled,
+      syncedToFirebase: true,
+      updatedAt: new Date().toISOString(),
+    };
+
+    // 1. Update users list in state & local storage
+    const newUsers = users.map((u) => (u.id === editingUser.id || u.extension === editingUser.extension ? updatedUser : u));
+    onUpdateUsers(newUsers);
+
+    // 2. If editing current logged-in user, update session immediately
+    if (currentUser.id === editingUser.id || currentUser.extension === editingUser.extension) {
+      onUpdateCurrentUser?.(updatedUser);
+    }
+
+    // 3. Automatically sync updated fields to Firebase Firestore & RTDB
+    await autoSaveUserToFirebase(updatedUser);
+
+    setIsSavingEdit(false);
+    setEditingUser(null);
+    setSyncToast(`تم حفظ وتحديث بيانات المستخدم (${updatedUser.name} - #${updatedUser.extension}) ومزامنتها على Firebase!`);
+    setTimeout(() => setSyncToast(null), 4000);
+  };
+
+  const handleOpenDeleteModal = (user: PBXUser) => {
+    setDeletingUser(user);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deletingUser) return;
+    setIsDeletingLoading(true);
+
+    const deletedUser = deletingUser;
+
+    // 1. Remove from users list
+    const newUsers = users.filter((u) => u.id !== deletedUser.id && u.extension !== deletedUser.extension);
+    onUpdateUsers(newUsers);
+
+    // 2. Add to deleted tracking list in localStorage to prevent restoring
+    try {
+      const existingDeleted: string[] = JSON.parse(localStorage.getItem('etsalati_deleted_users') || '[]');
+      if (!existingDeleted.includes(deletedUser.id)) existingDeleted.push(deletedUser.id);
+      if (!existingDeleted.includes(deletedUser.extension)) existingDeleted.push(deletedUser.extension);
+      localStorage.setItem('etsalati_deleted_users', JSON.stringify(existingDeleted));
+      localStorage.setItem('etsalati_users', JSON.stringify(newUsers));
+    } catch {
+      // ignore
+    }
+
+    // 3. Delete from Firebase Firestore & RTDB
+    await deleteUserFromFirebase(deletedUser);
+
+    // 4. Check if current user deleted themselves
+    const isSelf = currentUser.id === deletedUser.id || currentUser.extension === deletedUser.extension;
+
+    setIsDeletingLoading(false);
+    setDeletingUser(null);
+
+    if (isSelf) {
+      onUpdateCurrentUser?.(null);
+    } else {
+      setSyncToast(`تم حذف المستخدم (${deletedUser.name} - #${deletedUser.extension}) نهائياً من النظام وFirebase.`);
+      setTimeout(() => setSyncToast(null), 4000);
+    }
+  };
 
   const toggleSecret = (id: string) => {
     setShowSecrets((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -208,6 +337,7 @@ export const UsersExtensionsView: React.FC<UsersExtensionsViewProps> = ({
                 <th className="py-3 px-4">حالة التواجد (Presence)</th>
                 <th className="py-3 px-4">كلمة المرور للدخول و3CX</th>
                 <th className="py-3 px-4 text-center">إعدادات 3CX</th>
+                <th className="py-3 px-4 text-center">التحكم والإجراءات</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60">
@@ -307,6 +437,28 @@ export const UsersExtensionsView: React.FC<UsersExtensionsViewProps> = ({
                           title="تحميل ملف .3cxconfig"
                         >
                           <Download className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </td>
+
+                    {/* Edit & Delete Actions */}
+                    <td className="py-3.5 px-4 text-center">
+                      <div className="flex items-center justify-center gap-1.5">
+                        <button
+                          onClick={() => handleOpenEditModal(u)}
+                          className="px-2.5 py-1 rounded-lg bg-cyan-950/60 hover:bg-cyan-900 border border-cyan-500/40 text-cyan-300 hover:text-cyan-100 text-[11px] font-semibold flex items-center gap-1 transition-all active:scale-95 cursor-pointer shadow-sm shadow-cyan-950/50"
+                          title="تعديل بيانات المستخدم والتحويلة"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                          <span>تعديل</span>
+                        </button>
+                        <button
+                          onClick={() => handleOpenDeleteModal(u)}
+                          className="px-2.5 py-1 rounded-lg bg-rose-950/60 hover:bg-rose-900 border border-rose-500/40 text-rose-300 hover:text-rose-100 text-[11px] font-semibold flex items-center gap-1 transition-all active:scale-95 cursor-pointer shadow-sm shadow-rose-950/50"
+                          title="حذف المستخدم والتحويلة نهائياً"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>حذف</span>
                         </button>
                       </div>
                     </td>
@@ -586,6 +738,325 @@ export const UsersExtensionsView: React.FC<UsersExtensionsViewProps> = ({
                   className="px-5 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs transition-colors cursor-pointer"
                 >
                   تم، إغلاق
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit User / Extension Modal */}
+      {editingUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md animate-in fade-in">
+          <div className="bg-slate-900 border border-slate-700 rounded-3xl w-full max-w-lg shadow-2xl overflow-hidden max-h-[90vh] flex flex-col animate-in zoom-in-95">
+            <div className="bg-slate-800/90 px-6 py-4 border-b border-slate-700 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-cyan-500/20 text-cyan-400 flex items-center justify-center">
+                  <Pencil className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">تعديل بيانات المستخدم والتحويلة</h3>
+                  <p className="text-[11px] text-slate-400">
+                    تعديل حساب: {editingUser.name} (#{editingUser.extension}) ومزامنته فوراً
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setEditingUser(null)}
+                className="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-slate-700 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEditedUser} className="p-6 space-y-4 overflow-y-auto flex-1 text-right">
+              {/* Full Name */}
+              <div>
+                <label className="text-xs font-semibold text-slate-300 block mb-1">اسم الموظف بالكامل: *</label>
+                <input
+                  type="text"
+                  required
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  placeholder="مثال: محمد السيد"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+
+              {/* Username (Login ID) & Extension */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-semibold text-slate-300 block mb-1">
+                    اسم المستخدم / ID للدخول: *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={editUsername}
+                    onChange={(e) => setEditUsername(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 font-mono focus:outline-none focus:border-cyan-500"
+                  />
+                  <span className="text-[10px] text-slate-500 mt-0.5 block">معرف الدخول للنظام</span>
+                </div>
+
+                <div>
+                  <label className="text-xs font-semibold text-slate-300 block mb-1">
+                    رقم التحويلة الداخلية: *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={editExtension}
+                    onChange={(e) => setEditExtension(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 font-mono focus:outline-none focus:border-cyan-500"
+                  />
+                  <span className="text-[10px] text-slate-500 mt-0.5 block">رقم طلب الخط الداخلي</span>
+                </div>
+              </div>
+
+              {/* Password & Role */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-semibold text-slate-300 block mb-1">
+                    كلمة المرور (للدخول ولـ 3CX): *
+                  </label>
+                  <div className="relative">
+                    <input
+                      type={editShowPassword ? 'text' : 'password'}
+                      required
+                      value={editPassword}
+                      onChange={(e) => setEditPassword(e.target.value)}
+                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500 font-mono pl-9"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setEditShowPassword(!editShowPassword)}
+                      className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 p-1"
+                    >
+                      {editShowPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs font-semibold text-slate-300 block mb-1">نوع الصلاحية والشاشة:</label>
+                  <select
+                    value={editRole}
+                    onChange={(e) => setEditRole(e.target.value as any)}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
+                  >
+                    <option value="agent">موظف اتصال (شاشة الأزرار و3CX فقط)</option>
+                    <option value="admin">مدير نظام (لوحة التحكم الكاملة)</option>
+                    <option value="supervisor">مشرف خدمة</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Email & Status */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-semibold text-slate-300 block mb-1">البريد الإلكتروني:</label>
+                  <input
+                    type="email"
+                    value={editEmail}
+                    onChange={(e) => setEditEmail(e.target.value)}
+                    placeholder="user@etsalati.local"
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 font-mono focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-semibold text-slate-300 block mb-1">حالة التواجد (Presence):</label>
+                  <select
+                    value={editStatus}
+                    onChange={(e) => setEditStatus(e.target.value as any)}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
+                  >
+                    <option value="online">متاح (Online)</option>
+                    <option value="busy">مشغول (Busy)</option>
+                    <option value="dnd">ممنوع الإزعاج (DND)</option>
+                    <option value="away">في استراحة (Away)</option>
+                    <option value="offline">غير متصل (Offline)</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* SIP Server & Protocol */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-semibold text-slate-300 block mb-1">عنوان سيرفر SIP (PBX IP):</label>
+                  <input
+                    type="text"
+                    value={editSipServer}
+                    onChange={(e) => setEditSipServer(e.target.value)}
+                    placeholder="192.168.1.100"
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 font-mono focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-semibold text-slate-300 block mb-1">البروتوكول:</label>
+                  <select
+                    value={editProtocol}
+                    onChange={(e) => setEditProtocol(e.target.value as any)}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
+                  >
+                    <option value="SIP">SIP / PJSIP (موصى به لـ 3CX)</option>
+                    <option value="IAX2">IAX2</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Feature Toggles */}
+              <div className="grid grid-cols-2 gap-3 pt-1">
+                <label className="flex items-center gap-2 p-2.5 rounded-xl bg-slate-800/60 border border-slate-700/60 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={editVoicemailEnabled}
+                    onChange={(e) => setEditVoicemailEnabled(e.target.checked)}
+                    className="rounded text-cyan-500 focus:ring-0"
+                  />
+                  <span className="text-xs text-slate-300 font-semibold">تفعيل البريد الصوتي</span>
+                </label>
+
+                <label className="flex items-center gap-2 p-2.5 rounded-xl bg-slate-800/60 border border-slate-700/60 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={editRecordingEnabled}
+                    onChange={(e) => setEditRecordingEnabled(e.target.checked)}
+                    className="rounded text-cyan-500 focus:ring-0"
+                  />
+                  <span className="text-xs text-slate-300 font-semibold">تفعيل تسجيل المكالمات</span>
+                </label>
+              </div>
+
+              {/* Form Buttons */}
+              <div className="pt-3 border-t border-slate-800 flex items-center justify-end gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setEditingUser(null)}
+                  className="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white transition-colors cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingEdit}
+                  className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-cyan-600 to-cyan-500 hover:from-cyan-500 hover:to-cyan-400 text-white text-xs font-bold transition-all shadow-lg shadow-cyan-600/30 active:scale-95 cursor-pointer flex items-center gap-2"
+                >
+                  {isSavingEdit ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>جاري حفظ التعديلات...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Save className="w-4 h-4" />
+                      <span>حفظ التعديلات في النظام وFirebase</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Delete User Confirmation Modal */}
+      {deletingUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in">
+          <div className="bg-slate-900 border border-rose-500/50 rounded-3xl w-full max-w-md shadow-2xl overflow-hidden animate-in zoom-in-95">
+            {/* Header */}
+            <div className="bg-gradient-to-r from-rose-950/80 to-slate-900 px-6 py-4 border-b border-rose-500/30 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-400 flex items-center justify-center">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">تأكيد حذف المستخدم والتحويلة</h3>
+                  <p className="text-[11px] text-rose-300 font-medium">إجراء نهائي لا يمكن التراجع عنه</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setDeletingUser(null)}
+                disabled={isDeletingLoading}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Content */}
+            <div className="p-6 space-y-4 text-xs text-right">
+              <p className="text-slate-300 leading-relaxed">
+                هل أنت متأكد من رغبتك في حذف هذا المستخدم نهائياً؟ سيتم إلغاء التحويلة وحذف حسابه وجميع بياناته تلقائياً من النظام وقاعدة بيانات Firebase (مشروع mokalamaty-160e0).
+              </p>
+
+              {/* User details card */}
+              <div className="p-3.5 rounded-2xl bg-slate-800/80 border border-slate-700 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400">اسم الموظف:</span>
+                  <span className="text-white font-bold text-sm">{deletingUser.name}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400">رقم التحويلة (SIP Ext):</span>
+                  <span className="font-mono text-cyan-400 font-bold bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
+                    {deletingUser.extension}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400">اسم المستخدم (ID):</span>
+                  <span className="font-mono text-slate-300 font-bold">{deletingUser.username || deletingUser.extension}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400">نوع الصلاحية:</span>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                    deletingUser.role === 'admin' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' :
+                    deletingUser.role === 'supervisor' ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30' :
+                    'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+                  }`}>
+                    {deletingUser.role === 'admin' ? 'مدير نظام (Admin)' : deletingUser.role === 'supervisor' ? 'مشرف اتصالات' : 'موظف اتصال (Agent)'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Warning if deleting current session user */}
+              {(currentUser.id === deletingUser.id || currentUser.extension === deletingUser.extension) && (
+                <div className="p-3 rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-300 text-[11px] flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
+                  <span>
+                    ⚠️ <strong>تنبيه:</strong> أنت تقوم بحذف الحساب المسجل به حالياً! سيتم تسجيل خروجك فور تأكيد الحذف.
+                  </span>
+                </div>
+              )}
+
+              {/* Action Buttons */}
+              <div className="pt-3 border-t border-slate-800 flex items-center justify-end gap-2.5">
+                <button
+                  type="button"
+                  disabled={isDeletingLoading}
+                  onClick={() => setDeletingUser(null)}
+                  className="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white transition-colors cursor-pointer"
+                >
+                  إلغاء وتراجع
+                </button>
+                <button
+                  type="button"
+                  disabled={isDeletingLoading}
+                  onClick={handleConfirmDelete}
+                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-rose-600 to-rose-700 hover:from-rose-500 hover:to-rose-600 text-white text-xs font-bold transition-all shadow-lg shadow-rose-600/30 active:scale-95 cursor-pointer flex items-center gap-2"
+                >
+                  {isDeletingLoading ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>جاري الحذف من Firebase...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="w-4 h-4" />
+                      <span>تأكيد الحذف نهائياً</span>
+                    </>
+                  )}
                 </button>
               </div>
             </div>

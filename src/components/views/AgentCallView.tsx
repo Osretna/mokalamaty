@@ -21,7 +21,12 @@ import {
   Sparkles,
   Search,
   Radio,
-  UserCheck
+  UserCheck,
+  ExternalLink,
+  Volume2,
+  VolumeX,
+  Activity,
+  Waves
 } from 'lucide-react';
 import { PBXUser, Call } from '../../types';
 import {
@@ -29,6 +34,7 @@ import {
   playTelephonyFx
 } from '../../utils/audioTones';
 import { downloadCallAudioBlob } from '../../lib/firebase';
+import { webrtcVoice } from '../../utils/webrtcVoiceService';
 
 interface AgentCallViewProps {
   currentUser: PBXUser;
@@ -74,6 +80,12 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
   const [searchDirectory, setSearchDirectory] = useState('');
   const [isSwitchUserOpen, setIsSwitchUserOpen] = useState(false);
 
+  // WebRTC Real-Time Voice Chat states
+  const [voiceLevel, setVoiceLevel] = useState<number>(0);
+  const [voiceStatus, setVoiceStatus] = useState<'connecting' | 'connected' | 'failed' | 'idle'>('idle');
+  const [speakerVolume, setSpeakerVolume] = useState<number>(1);
+  const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
+
   // Find active call for this agent's extension (either as caller or as callee)
   const currentCall = activeCalls.find(
     (c) =>
@@ -82,6 +94,60 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
       c.status !== 'ended' &&
       c.status !== 'missed'
   );
+
+  // Connect real two-way microphone audio as soon as call is answered ('connected')
+  useEffect(() => {
+    if (currentCall && currentCall.status === 'connected') {
+      const isCaller =
+        String(currentCall.callerExtension || currentCall.extension).trim() ===
+        String(currentUser.extension).trim();
+
+      setVoiceStatus('connecting');
+      setVoiceNotice('جاري ربط المايكروفون وبدء المحادثة الصوتية الحية...');
+
+      webrtcVoice
+        .startVoiceSession(currentCall.id, isCaller, {
+          onAudioLevel: (lvl) => {
+            setVoiceLevel(lvl);
+          },
+          onStatusChange: (st) => {
+            if (st === 'connected') {
+              setVoiceStatus('connected');
+              setVoiceNotice('المحادثة الصوتية متصلة بالمايكروفون الآن - تحدث مع الطرف الآخر بحرية');
+            } else if (st === 'failed') {
+              setVoiceStatus('failed');
+              setVoiceNotice('يرجى السماح بصلاحية المايكروفون في المتصفح للتحدث بالصوت');
+            }
+          },
+          onError: (err) => {
+            setVoiceNotice(err);
+          },
+        })
+        .catch(() => {});
+
+      return () => {
+        webrtcVoice.endVoiceSession();
+        setVoiceStatus('idle');
+        setVoiceLevel(0);
+        setVoiceNotice(null);
+      };
+    } else {
+      webrtcVoice.endVoiceSession();
+      setVoiceStatus('idle');
+      setVoiceLevel(0);
+      setVoiceNotice(null);
+    }
+  }, [currentCall?.id, currentCall?.status]);
+
+  const handleToggleMute = () => {
+    const next = webrtcVoice.toggleMute();
+    setIsMuted(next);
+  };
+
+  const handleChangeVolume = (vol: number) => {
+    setSpeakerVolume(vol);
+    webrtcVoice.setVolume(vol);
+  };
 
   // DTMF keypad buttons
   const keypad = [
@@ -426,6 +492,14 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
                       {!isSelf && (
                         <div className="flex items-center gap-1.5 shrink-0">
                           <button
+                            onClick={() => window.open(`/?user=${u.extension}`, '_blank')}
+                            title={`فتح خط تحويلة ${u.name} (#${u.extension}) في نافذة مستقلة للرد والتحدث`}
+                            className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-cyan-300 border border-slate-700 text-[11px] font-bold flex items-center gap-1 transition-all cursor-pointer"
+                          >
+                            <ExternalLink className="w-3 h-3" />
+                            <span className="hidden sm:inline">فتح الخط</span>
+                          </button>
+                          <button
                             onClick={() => onMakeCall(u.extension, u.name)}
                             disabled={!!currentCall}
                             className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-cyan-600 to-emerald-600 hover:from-cyan-500 hover:to-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold flex items-center gap-1 shadow-md shadow-cyan-600/20 transition-all cursor-pointer active:scale-95"
@@ -471,7 +545,7 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
                         <div>
                           <div className="flex items-center gap-2">
                             <span className="text-xs font-bold text-amber-300 bg-amber-500/20 border border-amber-500/40 px-2.5 py-0.5 rounded-full">
-                              جاري رنين خط الموظف... (Ringing)
+                              أنت المتصل ⬅️ جاري رنين هاتف الزميل
                             </span>
                             <span className="text-xs font-mono font-bold text-slate-400 bg-slate-800 px-2.5 py-0.5 rounded-full">
                               كود: {currentCall.callCode}
@@ -489,35 +563,56 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
                       <div className="flex flex-col sm:items-end gap-2.5">
                         <div className="text-xs text-amber-300 font-bold flex items-center gap-1.5">
                           <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping" />
-                          <span>في انتظار رد الموظف...</span>
+                          <span>في انتظار رد الموظف على هاتفه...</span>
                         </div>
                         <div className="flex items-center gap-2">
-                          {onSimulateRemoteAnswer && (
-                            <button
-                              onClick={() => onSimulateRemoteAnswer(currentCall.id)}
-                              className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black flex items-center gap-1.5 shadow-lg shadow-emerald-600/30 transition-all cursor-pointer active:scale-95"
-                              title="الرد على المكالمة فوراً في نفس المتصفح للتجربة"
-                            >
-                              <PhoneCall className="w-4 h-4" />
-                              <span>الرد فوراً</span>
-                            </button>
-                          )}
                           <button
                             onClick={() => onHangupCall(currentCall.id)}
                             className="px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-black flex items-center gap-2 shadow-lg shadow-red-600/30 transition-all cursor-pointer active:scale-95"
                           >
                             <PhoneOff className="w-4 h-4" />
-                            <span>إلغاء</span>
+                            <span>إلغاء الاتصال</span>
                           </button>
                         </div>
                       </div>
                     </div>
 
-                    <div className="p-3.5 rounded-2xl bg-cyan-950/30 border border-cyan-500/30 text-xs text-slate-300 flex items-center gap-2.5">
-                      <Sparkles className="w-4 h-4 text-cyan-400 shrink-0" />
-                      <span>
-                        يتم إرسال إشارة الرنين الآن إلى شاشة الزميل مباشرة. بمجرد ضغطه على الرد ستتحول المكالمة تلقائياً لمكالمة متصلة ويبدأ عداد التوقيت.
-                      </span>
+                    {/* Multi-Window / Real Voice Calling Instructions */}
+                    <div className="p-5 rounded-2xl bg-cyan-950/40 border-2 border-cyan-500/40 shadow-lg space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-cyan-300 font-bold text-xs">
+                          <Sparkles className="w-4 h-4 text-cyan-400 shrink-0" />
+                          <span>لتجربة المكالمة الحقيقية والتحدث المباشر بالصوت (WebRTC Voice):</span>
+                        </div>
+                        <span className="text-[10px] text-cyan-300 bg-cyan-500/20 px-2 py-0.5 rounded-full font-mono font-bold">
+                          تحويلة #{currentCall.calleeExtension}
+                        </span>
+                      </div>
+                      
+                      <p className="text-xs text-slate-300 leading-relaxed">
+                        هاتف الزميل <strong>({currentCall.calleeName || currentCall.calleeExtension})</strong> يرن الآن. افتح شاشته في تبويب مستقل ثم اضغط <strong>"الرد على المكالمة"</strong> هناك لتبدآ الحديث الصوتي المباشر عبر المايكروفون.
+                      </p>
+
+                      <div className="flex flex-wrap items-center gap-3 pt-1">
+                        <button
+                          onClick={() => window.open(`/?user=${currentCall.calleeExtension}`, '_blank')}
+                          className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-cyan-600 to-emerald-600 hover:from-cyan-500 hover:to-emerald-500 text-white text-xs font-black flex items-center gap-2 shadow-lg shadow-cyan-600/30 transition-all cursor-pointer active:scale-95"
+                        >
+                          <ExternalLink className="w-4 h-4" />
+                          <span>فتح نافذة خط ({currentCall.calleeName} #{currentCall.calleeExtension}) للرد والتحدث</span>
+                        </button>
+
+                        {onSimulateRemoteAnswer && (
+                          <button
+                            onClick={() => onSimulateRemoteAnswer(currentCall.id)}
+                            className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 text-[11px] font-semibold flex items-center gap-1.5 border border-slate-700 transition-all cursor-pointer"
+                            title="للتجربة السريعة داخل نفس هذه الشاشة دون فتح نافذة ثانية"
+                          >
+                            <PhoneCall className="w-3.5 h-3.5 text-emerald-400" />
+                            <span>محاكاة الرد في نفس الشاشة (Demo)</span>
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 ) : (
@@ -562,6 +657,68 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
                       </div>
                     </div>
 
+                    {/* Live WebRTC Real-Time Voice Waveform & Microphone Bar */}
+                    <div className="p-4 rounded-2xl bg-gradient-to-r from-cyan-950/40 via-slate-900 to-emerald-950/40 border border-cyan-500/30 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
+                          <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                            <Headphones className="w-4 h-4 text-emerald-400" />
+                            <span>المحادثة الصوتية الحية المباشرة (Live WebRTC Audio)</span>
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] font-mono text-emerald-400 bg-emerald-500/10 px-2.5 py-0.5 rounded-full border border-emerald-500/20 font-bold">
+                            {voiceStatus === 'connected' ? '🎙️ المايكروفون نشط' : '⏳ جاري ربط الصوت...'}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Live Dancing Voice Waveform Bars */}
+                      <div className="flex items-center justify-center gap-1.5 py-3 bg-slate-950/70 rounded-xl border border-slate-800 px-4">
+                        {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16].map((barIdx) => {
+                          const heightFactor = Math.max(4, Math.min(26, (voiceLevel / 100) * 32 * (0.35 + Math.sin(barIdx * 0.9) * 0.65)));
+                          return (
+                            <div
+                              key={barIdx}
+                              className={`w-1.5 rounded-full transition-all duration-75 ${
+                                voiceLevel > 8 ? 'bg-gradient-to-t from-emerald-500 to-cyan-400' : 'bg-slate-700'
+                              }`}
+                              style={{ height: `${heightFactor}px` }}
+                            />
+                          );
+                        })}
+                      </div>
+
+                      {/* Volume & Notice row */}
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-slate-300 pt-1">
+                        <span className="text-[11px] text-slate-400">
+                          {voiceNotice || 'تحدث في المايكروفون وسيسمعك الطرف الآخر فوراً'}
+                        </span>
+
+                        {/* Speaker Volume Slider */}
+                        <div className="flex items-center gap-2 self-end sm:self-auto">
+                          <button
+                            type="button"
+                            onClick={() => handleChangeVolume(speakerVolume > 0 ? 0 : 1)}
+                            className="text-slate-400 hover:text-white cursor-pointer"
+                          >
+                            {speakerVolume === 0 ? <VolumeX className="w-4 h-4 text-red-400" /> : <Volume2 className="w-4 h-4 text-cyan-400" />}
+                          </button>
+                          <input
+                            type="range"
+                            min="0"
+                            max="1"
+                            step="0.05"
+                            value={speakerVolume}
+                            onChange={(e) => handleChangeVolume(parseFloat(e.target.value))}
+                            className="w-20 accent-cyan-500 cursor-pointer h-1.5 rounded-lg bg-slate-800"
+                            title="مستوى صوت السماعة"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
                     {/* Active In-Call Controls */}
                     <div className="grid grid-cols-3 gap-3">
                       {/* Hang Up */}
@@ -588,7 +745,7 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
 
                       {/* Mute Toggle */}
                       <button
-                        onClick={() => setIsMuted(!isMuted)}
+                        onClick={handleToggleMute}
                         className={`py-3.5 rounded-2xl border text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
                           isMuted
                             ? 'bg-red-500/20 text-red-300 border-red-500/50'
@@ -596,7 +753,7 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
                         }`}
                       >
                         {isMuted ? <MicOff className="w-4 h-4 text-red-400" /> : <Mic className="w-4 h-4" />}
-                        <span>{isMuted ? 'إلغاء الكتم' : 'كتم الصوت'}</span>
+                        <span>{isMuted ? 'إلغاء الكتم' : 'كتم المايك'}</span>
                       </button>
                     </div>
 

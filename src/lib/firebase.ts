@@ -191,9 +191,7 @@ export function subscribeActiveCalls(
     snapshot.forEach((d) => {
       list.push(d.data() as Call);
     });
-    if (list.length > 0) {
-      onUpdate(list);
-    }
+    onUpdate(list);
   }, (err) => {
     console.warn('active_calls firestore snapshot note:', err.message);
   });
@@ -373,6 +371,42 @@ export async function autoSaveUserToFirebase(user: PBXUser): Promise<boolean> {
     return true;
   } catch (error) {
     console.error('❌ Error saving user to Firebase:', error);
+    return false;
+  }
+}
+
+/**
+ * Delete a user / extension from Firebase Firestore and Realtime Database
+ */
+export async function deleteUserFromFirebase(user: PBXUser): Promise<boolean> {
+  try {
+    // 1. Delete from Firestore collection "users"
+    const docId = user.id || `usr-${user.extension}`;
+    const userDocRef = doc(db, 'users', docId);
+    await deleteDoc(userDocRef);
+
+    // Also delete with extension fallback if doc ID differs
+    try {
+      const extDocRef = doc(db, 'users', `usr-${user.extension}`);
+      await deleteDoc(extDocRef);
+    } catch {
+      // ignore
+    }
+
+    // 2. Remove from Realtime Database
+    try {
+      const rtdbRef = ref(rtdb, `users/${user.extension}`);
+      await remove(rtdbRef);
+      const presenceRef = ref(rtdb, `presence/${user.extension}`);
+      await remove(presenceRef);
+    } catch (rtdbErr) {
+      console.warn('Realtime Database remove notice:', rtdbErr);
+    }
+
+    console.log(`🗑️ [Firebase Sync] User ${user.name} (${user.extension}) deleted from Firestore & RTDB!`);
+    return true;
+  } catch (error) {
+    console.error('❌ Error deleting user from Firebase:', error);
     return false;
   }
 }

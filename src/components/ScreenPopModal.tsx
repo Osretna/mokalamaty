@@ -149,16 +149,23 @@ export const ScreenPopModal: React.FC<ScreenPopModalProps> = ({
               )}
             </div>
           ) : (
-            <div className="p-4 rounded-xl bg-slate-800/80 border border-slate-700 text-center space-y-2">
-              <div className="w-12 h-12 rounded-full bg-slate-700/50 text-slate-400 mx-auto flex items-center justify-center">
-                <User className="w-6 h-6" />
+            <div className="p-5 rounded-2xl bg-gradient-to-br from-slate-800 to-slate-850 border border-slate-700 text-center space-y-3">
+              <div className="w-16 h-16 rounded-2xl bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 mx-auto flex items-center justify-center animate-pulse">
+                <User className="w-8 h-8" />
               </div>
-              <div className="text-base font-bold text-white">رقم غير مسجل في الـ CRM</div>
-              <div className="text-sm font-mono text-cyan-400" dir="ltr">
-                {incomingCall.callerNumber}
+              <div>
+                <div className="inline-flex items-center gap-1.5 px-3 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-xs font-bold mb-2">
+                  <span>اتصال داخلي مباشر (Internal PBX)</span>
+                </div>
+                <div className="text-xl font-black text-white">
+                  {incomingCall.callerName || 'متصل غير مسجل'}
+                </div>
+                <div className="text-sm font-mono text-cyan-400 font-bold mt-1" dir="ltr">
+                  تحويلة المتصل: #{incomingCall.callerExtension || incomingCall.callerNumber}
+                </div>
               </div>
-              <p className="text-xs text-slate-400">
-                يمكنك الرد وتسجيل بيانات المتصل لاحقاً في قاعدة بيانات العملاء.
+              <p className="text-xs text-slate-300">
+                اضغط على زر <strong>"الرد على المكالمة"</strong> لبدء المحادثة الصوتية المباشرة عبر المايكروفون.
               </p>
             </div>
           )}

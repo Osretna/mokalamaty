@@ -54,6 +54,7 @@ import {
   subscribeOnlinePresence,
   callBus,
 } from './lib/firebase';
+import { webrtcVoice } from './utils/webrtcVoiceService';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
@@ -116,12 +117,39 @@ export default function App() {
   const [onlineUsers, setOnlineUsers] = useState<Record<string, { lastSeen: number; name: string; extension: string }>>({});
 
   const [currentUser, setCurrentUser] = useState<PBXUser | null>(() => {
-    const saved = localStorage.getItem('etsalati_logged_in_user');
-    if (saved) {
+    if (typeof window !== 'undefined') {
       try {
-        return JSON.parse(saved);
-      } catch {
-        return null;
+        const urlParams = new URLSearchParams(window.location.search);
+        const userParam = urlParams.get('user') || urlParams.get('ext');
+        if (userParam) {
+          const found = INITIAL_USERS.find(
+            (u) =>
+              u.extension.trim() === userParam.trim() ||
+              (u.username && u.username.trim() === userParam.trim())
+          );
+          if (found) {
+            sessionStorage.setItem('etsalati_session_user', JSON.stringify(found));
+            return found;
+          }
+        }
+      } catch (e) {
+        console.debug(e);
+      }
+
+      const sessionSaved = sessionStorage.getItem('etsalati_session_user');
+      if (sessionSaved) {
+        try {
+          return JSON.parse(sessionSaved);
+        } catch {}
+      }
+
+      const saved = localStorage.getItem('etsalati_logged_in_user');
+      if (saved) {
+        try {
+          return JSON.parse(saved);
+        } catch {
+          return null;
+        }
       }
     }
     return INITIAL_USERS[0]; // Eng. Nesma Gamal (Admin) by default
@@ -163,8 +191,10 @@ export default function App() {
 
   useEffect(() => {
     if (currentUser) {
+      sessionStorage.setItem('etsalati_session_user', JSON.stringify(currentUser));
       localStorage.setItem('etsalati_logged_in_user', JSON.stringify(currentUser));
     } else {
+      sessionStorage.removeItem('etsalati_session_user');
       localStorage.removeItem('etsalati_logged_in_user');
     }
   }, [currentUser]);
@@ -203,10 +233,20 @@ export default function App() {
     const unsubscribe = subscribeUsersFromFirebase((firebaseUsers) => {
       if (firebaseUsers && firebaseUsers.length > 0) {
         setUsers((prev) => {
-          // Merge Firebase users with current state
-          const map = new Map(prev.map((u) => [u.extension, u]));
-          firebaseUsers.forEach((fbU) => map.set(fbU.extension, fbU));
-          return Array.from(map.values());
+          let deletedIds: string[] = [];
+          try {
+            deletedIds = JSON.parse(localStorage.getItem('etsalati_deleted_users') || '[]');
+          } catch {
+            deletedIds = [];
+          }
+          // Merge Firebase users with current state excluding deleted ones
+          const map = new Map<string, PBXUser>(prev.filter((u) => !deletedIds.includes(u.id) && !deletedIds.includes(u.extension)).map((u) => [u.extension, u]));
+          firebaseUsers.forEach((fbU) => {
+            if (!deletedIds.includes(fbU.id) && !deletedIds.includes(fbU.extension)) {
+              map.set(fbU.extension, fbU);
+            }
+          });
+          return Array.from(map.values()).filter((u: PBXUser) => !deletedIds.includes(u.id) && !deletedIds.includes(u.extension));
         });
       }
     });
@@ -464,6 +504,7 @@ export default function App() {
     stopHoldMusic();
     stopRingback();
     stopIncomingRing();
+    webrtcVoice.endVoiceSession();
     playTelephonyFx('hangup');
     const callToArchive = activeCalls.find((c) => c.id === callId);
     if (callToArchive) {
@@ -598,6 +639,7 @@ export default function App() {
   const handleRejectIncomingCall = (call: Call) => {
     stopIncomingRing();
     stopRingback();
+    webrtcVoice.endVoiceSession();
     playTelephonyFx('hangup');
     const missedCall: Call = {
       ...call,
@@ -820,6 +862,15 @@ export default function App() {
             users={users}
             currentUser={currentUser}
             onUpdateUsers={setUsers}
+            onUpdateCurrentUser={(updated) => {
+              if (updated) {
+                setCurrentUser(updated);
+                sessionStorage.setItem('etsalati_session_user', JSON.stringify(updated));
+                localStorage.setItem('etsalati_logged_in_user', JSON.stringify(updated));
+              } else {
+                handleLogout();
+              }
+            }}
           />
         )}
 
