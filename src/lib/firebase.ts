@@ -117,6 +117,7 @@ export async function updateActiveCall(callId: string, updates: Partial<Call>): 
   try {
     const callRef = doc(db, 'active_calls', callId);
     await setDoc(callRef, {
+      id: callId,
       ...updates,
       updatedAt: new Date().toISOString(),
     }, { merge: true });
@@ -128,6 +129,7 @@ export async function updateActiveCall(callId: string, updates: Partial<Call>): 
   try {
     const rtdbRef = ref(rtdb, `activeCalls/${callId}`);
     await update(rtdbRef, {
+      id: callId,
       ...updates,
       updatedAt: Date.now(),
     });
@@ -230,7 +232,8 @@ export function subscribeActiveCalls(
     unsubFirestore = onSnapshot(colRef, (snapshot) => {
       const list: Call[] = [];
       snapshot.forEach((d) => {
-        list.push(d.data() as Call);
+        const item = d.data() as Call;
+        list.push({ ...item, id: item.id || d.id });
       });
       firestoreCalls = list;
       emitMerged();
@@ -249,7 +252,10 @@ export function subscribeActiveCalls(
       if (snapshot.exists()) {
         const data = snapshot.val();
         if (data && typeof data === 'object') {
-          rtdbCalls = Object.values(data) as Call[];
+          rtdbCalls = Object.entries(data).map(([key, val]) => ({
+            ...(val as any),
+            id: (val as any)?.id || key,
+          })) as Call[];
         } else {
           rtdbCalls = [];
         }
@@ -606,15 +612,20 @@ export async function autoSaveCallToFirebase(call: Call): Promise<boolean> {
 
     // Also mirror to Realtime Database for active channels
     try {
-      const callRtdbRef = ref(rtdb, `activeCalls/${call.callCode || call.id}`);
+      const callRtdbRef = ref(rtdb, `activeCalls/${call.id}`);
       await set(callRtdbRef, {
+        id: call.id,
         callCode: call.callCode,
         callerNumber: call.callerNumber,
         callerName: call.callerName,
+        callerExtension: call.callerExtension,
+        calleeExtension: call.calleeExtension,
+        calleeName: call.calleeName,
         extension: call.extension,
         status: call.status,
         duration: call.duration,
         direction: call.direction,
+        updatedAt: Date.now(),
       });
     } catch {
       // ignore RTDB error if permissions restrict

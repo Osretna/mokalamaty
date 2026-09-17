@@ -24,6 +24,7 @@ import {
   UserCheck,
   ExternalLink,
   Volume2,
+  Volume1,
   VolumeX,
   Activity,
   Waves
@@ -85,6 +86,8 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
   const [voiceStatus, setVoiceStatus] = useState<'connecting' | 'connected' | 'failed' | 'idle'>('idle');
   const [speakerVolume, setSpeakerVolume] = useState<number>(1);
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
+  const [isSpeakerphone, setIsSpeakerphone] = useState<boolean>(() => webrtcVoice.getIsSpeakerphoneOn());
+  const [speakerGainBoost, setSpeakerGainBoost] = useState<number>(2.8);
 
   // Helper to normalize extension strings (removes '#', spaces, etc.)
   const cleanExt = (e?: string | number) => (e ? String(e).replace(/[^0-9a-zA-Z]/g, '').trim().toLowerCase() : '');
@@ -157,6 +160,20 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
   const handleChangeVolume = (vol: number) => {
     setSpeakerVolume(vol);
     webrtcVoice.setVolume(vol);
+  };
+
+  const handleToggleSpeakerphone = () => {
+    const next = webrtcVoice.toggleSpeakerphone();
+    setIsSpeakerphone(next);
+  };
+
+  const handleSetSpeakerGain = (boost: number) => {
+    setSpeakerGainBoost(boost);
+    webrtcVoice.setSpeakerphoneGain(boost);
+    if (!isSpeakerphone) {
+      webrtcVoice.setSpeakerphone(true);
+      setIsSpeakerphone(true);
+    }
   };
 
   // DTMF keypad buttons
@@ -701,18 +718,35 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
                         })}
                       </div>
 
-                      {/* Volume & Notice row */}
+                      {/* Volume & Notice row with Loudspeaker Switch */}
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-slate-300 pt-1">
-                        <span className="text-[11px] text-slate-400">
+                        <span className="text-[11px] text-slate-400 flex items-center gap-1.5">
+                          <span className={`w-2 h-2 rounded-full ${voiceStatus === 'connected' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
                           {voiceNotice || 'تحدث في المايكروفون وسيسمعك الطرف الآخر فوراً'}
                         </span>
 
-                        {/* Speaker Volume Slider */}
+                        {/* Speaker Volume Slider & Loudspeaker Quick Switch */}
                         <div className="flex items-center gap-2 self-end sm:self-auto">
+                          <button
+                            type="button"
+                            onClick={handleToggleSpeakerphone}
+                            id="btn-agent-loudspeaker-quick"
+                            className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-all flex items-center gap-1 cursor-pointer ${
+                              isSpeakerphone
+                                ? 'bg-gradient-to-r from-cyan-500/30 to-emerald-500/30 text-cyan-200 border-cyan-400 shadow-sm shadow-cyan-500/30'
+                                : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
+                            }`}
+                            title="تبديل وضع مكبر الصوت للهاتف"
+                          >
+                            <Volume2 className={`w-3.5 h-3.5 ${isSpeakerphone ? 'text-cyan-300 animate-pulse' : ''}`} />
+                            <span>{isSpeakerphone ? 'سبيكر الهاتف نشط 🔊' : 'سبيكر الهاتف 🔈'}</span>
+                          </button>
+
                           <button
                             type="button"
                             onClick={() => handleChangeVolume(speakerVolume > 0 ? 0 : 1)}
                             className="text-slate-400 hover:text-white cursor-pointer"
+                            title={speakerVolume === 0 ? 'تشغيل الصوت' : 'كتم الصوت'}
                           >
                             {speakerVolume === 0 ? <VolumeX className="w-4 h-4 text-red-400" /> : <Volume2 className="w-4 h-4 text-cyan-400" />}
                           </button>
@@ -728,36 +762,70 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
                           />
                         </div>
                       </div>
+
+                      {/* Speakerphone Gain Boost Level (عند تفعيل مكبر الصوت) */}
+                      {isSpeakerphone && (
+                        <div className="pt-2 border-t border-cyan-900/40 flex items-center justify-between text-[11px] text-cyan-300">
+                          <span className="font-semibold flex items-center gap-1">
+                            <Volume2 className="w-3.5 h-3.5 text-cyan-400" />
+                            <span>تضخيم مكبر الصوت للهاتف:</span>
+                          </span>
+                          <div className="flex items-center gap-1">
+                            {[1.5, 2.2, 2.8, 3.5].map((gain) => (
+                              <button
+                                key={gain}
+                                type="button"
+                                onClick={() => handleSetSpeakerGain(gain)}
+                                className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold cursor-pointer transition-colors ${
+                                  speakerGainBoost === gain
+                                    ? 'bg-cyan-500 text-slate-950 shadow-sm shadow-cyan-400/50'
+                                    : 'bg-slate-800 text-slate-400 hover:text-white'
+                                }`}
+                              >
+                                {Math.round(gain * 100)}%
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
 
-                    {/* Active In-Call Controls */}
-                    <div className="grid grid-cols-3 gap-3">
+                    {/* Active In-Call Controls (with Loudspeaker) */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                       {/* Hang Up */}
                       <button
                         onClick={() => onHangupCall(currentCall.id)}
-                        className="py-3.5 rounded-2xl bg-red-600 hover:bg-red-500 text-white font-black text-xs sm:text-sm flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 transition-all active:scale-95 cursor-pointer"
+                        id="btn-agent-hangup"
+                        className="py-3 px-3 rounded-2xl bg-red-600 hover:bg-red-500 text-white font-black text-xs sm:text-sm flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 transition-all active:scale-95 cursor-pointer"
                       >
                         <PhoneOff className="w-4 h-4 sm:w-5 sm:h-5" />
                         <span>إنهاء المكالمة</span>
                       </button>
 
-                      {/* Hold Toggle */}
+                      {/* Loudspeaker (مكبر الصوت للهاتف) */}
                       <button
-                        onClick={() => onHoldToggle(currentCall.id)}
-                        className={`py-3.5 rounded-2xl border text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
-                          currentCall.status === 'on_hold'
-                            ? 'bg-amber-500/20 text-amber-300 border-amber-500/50'
-                            : 'bg-slate-800 text-slate-300 border-slate-700 hover:border-slate-600'
+                        onClick={handleToggleSpeakerphone}
+                        id="btn-agent-speakerphone"
+                        className={`py-3 px-3 rounded-2xl border text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all active:scale-95 cursor-pointer ${
+                          isSpeakerphone
+                            ? 'bg-gradient-to-r from-cyan-500/30 to-emerald-500/30 text-cyan-200 border-cyan-400 ring-2 ring-cyan-500/40 shadow-lg shadow-cyan-500/20'
+                            : 'bg-slate-800 text-slate-300 border-slate-700 hover:border-slate-600 hover:text-white'
                         }`}
+                        title="تشغيل مكبر الصوت للهاتف لتكبير الصوت بدون وضعه على الأذن"
                       >
-                        {currentCall.status === 'on_hold' ? <Play className="w-4 h-4 text-amber-400" /> : <Pause className="w-4 h-4" />}
-                        <span>{currentCall.status === 'on_hold' ? 'استئناف' : 'تعليق (Hold)'}</span>
+                        {isSpeakerphone ? (
+                          <Volume2 className="w-4 h-4 sm:w-5 sm:h-5 text-cyan-300 animate-pulse" />
+                        ) : (
+                          <Volume1 className="w-4 h-4 sm:w-5 sm:h-5" />
+                        )}
+                        <span>{isSpeakerphone ? 'سبيكر: نشط 🔊' : 'مكبر الصوت 🔈'}</span>
                       </button>
 
                       {/* Mute Toggle */}
                       <button
                         onClick={handleToggleMute}
-                        className={`py-3.5 rounded-2xl border text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                        id="btn-agent-mute"
+                        className={`py-3 px-3 rounded-2xl border text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
                           isMuted
                             ? 'bg-red-500/20 text-red-300 border-red-500/50'
                             : 'bg-slate-800 text-slate-300 border-slate-700 hover:border-slate-600'
@@ -765,6 +833,20 @@ export const AgentCallView: React.FC<AgentCallViewProps> = ({
                       >
                         {isMuted ? <MicOff className="w-4 h-4 text-red-400" /> : <Mic className="w-4 h-4" />}
                         <span>{isMuted ? 'إلغاء الكتم' : 'كتم المايك'}</span>
+                      </button>
+
+                      {/* Hold Toggle */}
+                      <button
+                        onClick={() => onHoldToggle(currentCall.id)}
+                        id="btn-agent-hold"
+                        className={`py-3 px-3 rounded-2xl border text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                          currentCall.status === 'on_hold'
+                            ? 'bg-amber-500/20 text-amber-300 border-amber-500/50'
+                            : 'bg-slate-800 text-slate-300 border-slate-700 hover:border-slate-600'
+                        }`}
+                      >
+                        {currentCall.status === 'on_hold' ? <Play className="w-4 h-4 text-amber-400" /> : <Pause className="w-4 h-4" />}
+                        <span>{currentCall.status === 'on_hold' ? 'استئناف' : 'تعليق (Hold)'}</span>
                       </button>
                     </div>
 

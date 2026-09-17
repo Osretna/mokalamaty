@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0891b2" />
+      <stop offset="50%" stop-color="#0284c7" />
+      <stop offset="100%" stop-color="#059669" />
+    </linearGradient>
+    <linearGradient id="phoneGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#e0f2fe" />
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#06b6d4" flood-opacity="0.6"/>
+    </filter>
+  </defs>
+
+  <!-- Base Rounded Squircle with PBX Metallic Border -->
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="#030712" stroke="#1e293b" stroke-width="2" />
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="url(#bgGrad)" />
+
+  <!-- Digital Circuit / Sound Wave Accents -->
+  <path d="M12 32 C 16 26, 20 38, 24 32 C 28 26, 32 38, 36 32" fill="none" stroke="#67e8f9" stroke-width="1.8" stroke-linecap="round" opacity="0.4" />
+  <circle cx="48" cy="18" r="3.5" fill="#34d399" filter="url(#glow)" />
+  <circle cx="53" cy="24" r="2" fill="#a7f3d0" opacity="0.8" />
+
+  <!-- Glowing Telephone Handset Icon -->
+  <g filter="url(#glow)">
+    <path d="M22 17 C 20.5 17 19 18.5 19 20 C 19 23 21 28 26 34 C 31 40 37 43 40 43 C 41.5 43 43 41.5 43 40 L 40.5 35 C 40 34 38.5 33.5 37.5 34 L 35.5 35.5 C 33 34 30 31 28.5 28.5 L 30 26.5 C 30.5 25.5 30 24 29 23.5 L 24 21 C 23.5 18.5 22.5 17 22 17 Z" 
+          fill="url(#phoneGrad)" stroke="#0e7490" stroke-width="0.8" stroke-linejoin="round" />
+  </g>
+
+  <!-- Live Pulse Waves from Handset Earpiece -->
+  <path d="M38 17 C 42 19 45 23 46 28" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" opacity="0.9" />
+  <path d="M43 14 C 49 17 53 23 54 30" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" opacity="0.75" />
+</svg>

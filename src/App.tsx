@@ -4,6 +4,7 @@ import { Navigation, ActiveTab } from './components/Navigation';
 import { SoftphoneModal } from './components/SoftphoneModal';
 import { ScreenPopModal } from './components/ScreenPopModal';
 import { TransferModal } from './components/TransferModal';
+import { ActiveCallHUD } from './components/ActiveCallHUD';
 
 // Views
 import { DashboardView } from './components/views/DashboardView';
@@ -392,15 +393,19 @@ export default function App() {
           })
           .filter((c) => c.status !== 'ended' && c.status !== 'missed');
 
-        // If a remote call was accepted and involves this user as callee
+        // If a remote call was accepted and involves this user as caller OR callee
         liveCalls.forEach((rc) => {
-          const rcExt = cleanExt(rc.extension);
-          const rcCalleeExt = cleanExt(rc.calleeExtension);
-          if (
-            (rcExt === myExt || rcCalleeExt === myExt) &&
-            rc.status === 'connected' &&
-            !next.some((c) => c.id === rc.id)
-          ) {
+          if (rc.status !== 'connected' && rc.status !== 'ringing') return;
+          const rcCaller = cleanExt(rc.callerExtension || rc.extension);
+          const rcCallee = cleanExt(rc.calleeExtension);
+          const rcCallerName = String(rc.callerName || '').trim().toLowerCase();
+          const rcCalleeName = String(rc.calleeName || '').trim().toLowerCase();
+
+          const isParticipant =
+            (myExt && (rcCaller === myExt || rcCallee === myExt)) ||
+            (myName && (rcCallerName === myName || rcCalleeName === myName));
+
+          if (isParticipant && !next.some((c) => c.id === rc.id)) {
             next.push(rc);
             changed = true;
           }
@@ -760,6 +765,38 @@ export default function App() {
     setAdminPreviewAgent(false);
   };
 
+  // Active call involving this user (whether Admin or Agent)
+  const myExtNorm = cleanExt(currentUser?.extension);
+  const myNameNorm = String(currentUser?.name || '').trim().toLowerCase();
+
+  const myActiveCall = activeCalls.find((c) => {
+    if (c.status === 'ended' || c.status === 'missed') return false;
+    const callerExt = cleanExt(c.callerExtension || c.extension);
+    const calleeExt = cleanExt(c.calleeExtension);
+    const calleeName = String(c.calleeName || '').trim().toLowerCase();
+    const callerName = String(c.callerName || '').trim().toLowerCase();
+
+    return (
+      (myExtNorm && (callerExt === myExtNorm || calleeExt === myExtNorm)) ||
+      (myNameNorm && (calleeName === myNameNorm || callerName === myNameNorm))
+    );
+  });
+
+  // Connect real two-way WebRTC voice when Admin has a connected call outside AgentCallView
+  useEffect(() => {
+    if (currentUser?.role === 'admin' && !adminPreviewAgent) {
+      if (myActiveCall && myActiveCall.status === 'connected') {
+        const callerExt = cleanExt(myActiveCall.callerExtension || myActiveCall.extension);
+        const isCaller = callerExt === myExtNorm;
+        webrtcVoice
+          .startVoiceSession(myActiveCall.id, isCaller)
+          .catch((e) => console.debug('Admin WebRTC voice session note:', e));
+      } else if (!myActiveCall || myActiveCall.status === 'ended') {
+        webrtcVoice.endVoiceSession();
+      }
+    }
+  }, [myActiveCall?.id, myActiveCall?.status, currentUser?.role, adminPreviewAgent, myExtNorm]);
+
   // If not logged in -> Show Login Screen
   if (!currentUser) {
     return <LoginView users={users} onLoginSuccess={handleLoginSuccess} />;
@@ -953,6 +990,17 @@ export default function App() {
         users={users}
         onExecuteTransfer={handleExecuteTransfer}
       />
+
+      {/* Floating Active Call HUD with Loudspeaker & WebRTC Controls */}
+      {myActiveCall && (
+        <ActiveCallHUD
+          currentCall={myActiveCall}
+          currentUser={currentUser}
+          onHangup={handleHangup}
+          onHoldToggle={handleHoldToggle}
+          onOpenFullView={() => setAdminPreviewAgent(true)}
+        />
+      )}
     </div>
   );
 }
